@@ -459,6 +459,27 @@ class ScheduleManager:
             print(f"完成率: {summary['completion_rate']:.2f}%")
             print(f"鼓励: {summary['encouragement']}")
 
+    def clear_all_data(self):
+        """清空所有数据并重新初始化"""
+        confirm = input("\n警告：此操作将删除所有任务数据，包括固定任务和总结！\n确定要继续吗？(y/n): ")
+        if confirm.lower() != 'y':
+            print("已取消操作")
+            return
+            
+        # 删除数据文件
+        for file_path in [FILE_PATH, FIXED_TASKS_PATH, SUMMARY_PATH]:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        
+        # 重新初始化数据
+        self.schedule = {"items": []}
+        self.fixed_tasks = {"daily": [], "weekly": []}
+        self.summary = {"daily": {}, "weekly": {}, "monthly": {}}
+        
+        print("所有数据已清空，将重新设置固定任务")
+        # 重新设置固定任务
+        self.setup_fixed_tasks()
+
 def main():
     manager = ScheduleManager()
     # 首次运行时设置固定任务
@@ -476,7 +497,8 @@ def main():
         print("4. 生成周时间表")
         print("5. 开始任务")
         print("6. 查看总结")
-        print("7. 退出")
+        print("7. 清空所有数据并重新开始")
+        print("8. 退出")
         
         choice = input("请选择操作: ")
         
@@ -507,6 +529,9 @@ def main():
                 manager.print_summary("daily" if sub_choice == "1" else "weekly")
         
         elif choice == "7":
+            manager.clear_all_data()
+        
+        elif choice == "8":
             manager.reminder_event.set()
             print("感谢使用，再见！")
             break
