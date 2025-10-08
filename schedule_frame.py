@@ -481,7 +481,7 @@ class ScheduleManager:
         self.setup_fixed_tasks()
 
 def schedule_tasks_automatically(self):
-    """自动将待办任务插入到时间表的空闲时段，任务间保留间隙"""
+    """自动将待办任务插入到时间表的空闲时段，尽可能均匀分布任务"""
     timetable = self.generate_timetable()
     today = datetime.date.today().strftime("%Y-%m-%d")
     
@@ -489,60 +489,104 @@ def schedule_tasks_automatically(self):
         print("无法获取今天的时间表")
         return
     
-    # 任务间的间隙时间（分钟），可根据需要调整
-    GAP_BETWEEN_TASKS = 15  # 任务间保留15分钟间隙
-    
     # 获取今天的固定任务和待办任务
     fixed_tasks = sorted(timetable[today]["fixed"], key=lambda x: x["start"])
     pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] in ["pending", "in_progress"]]
     
-    # 计算空闲时间段
+    if not pending_tasks:
+        print("没有待安排的任务")
+        return
+    
+    # 计算总的空闲时间段和总空闲时长
     free_time = self._calculate_free_time(fixed_tasks)
+    total_free_duration = sum(end - start for start, end in free_time)
     
-    # 按任务所需时间排序（先安排耗时长的，更容易找到合适区间）
-    pending_tasks.sort(key=lambda x: x["remaining_time"], reverse=True)
+    # 计算所有任务需要的总时间
+    total_task_duration = sum(task["remaining_time"] for task in pending_tasks)
     
-    # 尝试为每个任务安排时间
+    if total_task_duration > total_free_duration:
+        print(f"可用时间不足，无法安排所有任务。需要{total_task_duration}分钟，仅可用{total_free_duration}分钟")
+        return
+    
+    # 计算最大可能的总间隙时间（总空闲时间 - 总任务时间）
+    total_possible_gap = total_free_duration - total_task_duration
+    # 计算任务间的最大可能间隙（任务数+1个间隙，首尾各一个）
+    max_gap_between_tasks = total_possible_gap // (len(pending_tasks) + 1)
+    # 至少保留10分钟间隙
+    min_gap = 10
+    gap_between_tasks = max(max_gap_between_tasks, min_gap)
+    
+    print(f"自动安排任务，任务间最大可能间隙为{gap_between_tasks}分钟")
+    
+    # 按任务所需时间排序（先短后长，更容易均匀分布）
+    pending_tasks.sort(key=lambda x: x["remaining_time"])
+    
+    # 合并所有空闲时间为一个连续的时间块（按时间顺序）
+    free_time.sort()
+    merged_free_time = []
+    current_start, current_end = free_time[0]
+    
+    for start, end in free_time[1:]:
+        if start <= current_end:
+            # 重叠或相邻，合并
+            current_end = max(current_end, end)
+        else:
+            merged_free_time.append((current_start, current_end))
+            current_start, current_end = start, end
+    merged_free_time.append((current_start, current_end))
+    
+    # 尝试在合并的空闲时间内均匀安排任务
     scheduled = []
-    for task in pending_tasks:
-        # 任务总占用时间 = 任务时间 + 间隙时间（最后一个任务不需要额外间隙）
-        required_duration = task["remaining_time"] + GAP_BETWEEN_TASKS
-        assigned = False
+    remaining_tasks = pending_tasks.copy()
+    
+    for start, end in merged_free_time:
+        period_duration = end - start
         
-        # 优先选择最大的空闲时间段来安排，实现任务分散
-        # 按空闲时长降序排序空闲区间
-        sorted_free_time = sorted(free_time, key=lambda x: x[1] - x[0], reverse=True)
-        
-        # 查找合适的空闲时间段
-        for i, (start, end) in enumerate(sorted_free_time):
-            free_duration = end - start
+        # 计算当前时间段可安排的任务数
+        if not remaining_tasks:
+            break
             
-            # 找到足够长的空闲时间（至少能容纳任务+间隙）
-            if free_duration >= required_duration or (free_duration >= task["remaining_time"] and len(scheduled) == 0):
-                # 原始索引（用于后续更新空闲时间列表）
-                original_index = free_time.index((start, end))
-                task_start = start
-                task_end = start + task["remaining_time"]
-                
-                # 更新空闲时间（分割剩余时间段）
-                remaining_start = task_end + GAP_BETWEEN_TASKS
-                if remaining_start < end:
-                    free_time[original_index] = (remaining_start, end)
-                else:
-                    del free_time[original_index]
-                
-                # 记录安排结果
-                scheduled.append({
-                    "task": task,
-                    "start": self.minutes_to_time(task_start),
-                    "end": self.minutes_to_time(task_end)
-                })
-                
-                assigned = True
-                break
+        # 当前时间段可分配的总时间（任务+间隙）
+        available_time = period_duration
+        # 计算最多可安排多少个任务
+        max_possible_tasks = 0
+        required_time = 0
         
-        if not assigned:
-            print(f"无法为任务「{task['name']}」找到合适的时间段，需要{task['remaining_time']}分钟（含间隙）")
+        for i, task in enumerate(remaining_tasks):
+            # 每个任务需要 任务时间 + 间隙时间（最后一个任务不需要）
+            task_required = task["remaining_time"] + (gap_between_tasks if i < len(remaining_tasks)-1 else 0)
+            if required_time + task_required <= available_time:
+                required_time += task_required
+                max_possible_tasks = i + 1
+            else:
+                break
+                
+        if max_possible_tasks == 0:
+            continue
+            
+        # 选择前max_possible_tasks个任务
+        tasks_to_schedule = remaining_tasks[:max_possible_tasks]
+        remaining_tasks = remaining_tasks[max_possible_tasks:]
+        
+        # 计算实际可用空间（减去任务总时间）
+        total_task_time = sum(task["remaining_time"] for task in tasks_to_schedule)
+        available_gap_space = period_duration - total_task_time
+        
+        # 计算实际间隙（尽可能接近最大可能间隙）
+        actual_gap = min(gap_between_tasks, available_gap_space // (len(tasks_to_schedule) + 1))
+        
+        # 安排任务
+        current_position = start + actual_gap  # 起始间隙
+        
+        for task in tasks_to_schedule:
+            task_end = current_position + task["remaining_time"]
+            scheduled.append({
+                "task": task,
+                "start": self.minutes_to_time(current_position),
+                "end": self.minutes_to_time(task_end)
+            })
+            # 加上间隙
+            current_position = task_end + actual_gap
     
     # 显示安排结果
     if scheduled:
@@ -551,6 +595,11 @@ def schedule_tasks_automatically(self):
             print(f"{item['start']} - {item['end']}: {item['task']['name']}")
     else:
         print("没有可安排的任务或无法安排任何任务")
+        
+    if remaining_tasks:
+        print("\n无法安排的任务:")
+        for task in remaining_tasks:
+            print(f"- {task['name']} (需要{task['remaining_time']}分钟)")
 
 def _calculate_free_time(self, fixed_tasks):
     """计算一天中的空闲时间段"""
