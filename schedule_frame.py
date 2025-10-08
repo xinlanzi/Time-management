@@ -633,9 +633,9 @@ def main():
         elif choice == "8":
             manager.reminder_event.set()
             print("感谢使用，再见！")
-            break
         elif choice == "9":
             manager.schedule_tasks_automatically()
+            break
         else:
             print("无效的选择，请重试。")
 
