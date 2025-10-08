@@ -480,6 +480,104 @@ class ScheduleManager:
         # 重新设置固定任务
         self.setup_fixed_tasks()
 
+def schedule_tasks_automatically(self):
+    """自动将待办任务插入到时间表的空闲时段"""
+    timetable = self.generate_timetable()
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    
+    if today not in timetable:
+        print("无法获取今天的时间表")
+        return
+    
+    # 获取今天的固定任务和待办任务
+    fixed_tasks = sorted(timetable[today]["fixed"], key=lambda x: x["start"])
+    pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] in ["pending", "in_progress"]]
+    
+    # 计算空闲时间段
+    free_time = self._calculate_free_time(fixed_tasks)
+    
+    # 按任务所需时间排序（先安排耗时短的）
+    pending_tasks.sort(key=lambda x: x["remaining_time"])
+    
+    # 尝试为每个任务安排时间
+    scheduled = []
+    for task in pending_tasks:
+        duration = task["remaining_time"]
+        assigned = False
+        
+        # 查找合适的空闲时间段
+        for i, (start, end) in enumerate(free_time):
+            free_duration = end - start
+            
+            # 找到足够长的空闲时间
+            if free_duration >= duration:
+                # 分配时间
+                task_start = start
+                task_end = start + duration
+                
+                # 更新空闲时间（分割剩余时间段）
+                if free_duration > duration:
+                    free_time[i] = (task_end, end)
+                else:
+                    del free_time[i]
+                
+                # 记录安排结果
+                scheduled.append({
+                    "task": task,
+                    "start": self.minutes_to_time(task_start),
+                    "end": self.minutes_to_time(task_end)
+                })
+                
+                assigned = True
+                break
+        
+        if not assigned:
+            print(f"无法为任务「{task['name']}」找到合适的时间段，需要{duration}分钟")
+    
+    # 显示安排结果
+    if scheduled:
+        print("\n=== 今日任务安排 ===")
+        for item in sorted(scheduled, key=lambda x: self.time_to_minutes(x["start"])):
+            print(f"{item['start']} - {item['end']}: {item['task']['name']}")
+    else:
+        print("没有可安排的任务或无法安排任何任务")
+
+def _calculate_free_time(self, fixed_tasks):
+    """计算一天中的空闲时间段"""
+    # 一天的时间范围（00:00 - 24:00）
+    day_start = 0  # 0分钟
+    day_end = 24 * 60  # 1440分钟
+    
+    # 处理跨天的固定任务（如睡觉从22:00到6:00）
+    fixed_periods = []
+    for task in fixed_tasks:
+        start = task["start"]
+        end = task["end"]
+        
+        if start < end:  # 正常时间段（如7:00-8:00）
+            fixed_periods.append((start, end))
+        else:  # 跨天时间段（如22:00-6:00）
+            fixed_periods.append((start, day_end))
+            fixed_periods.append((day_start, end))
+    
+    # 按开始时间排序
+    fixed_periods.sort()
+    
+    # 计算空闲时间
+    free_time = []
+    prev_end = day_start
+    
+    for start, end in fixed_periods:
+        if start > prev_end:
+            free_time.append((prev_end, start))
+        prev_end = max(prev_end, end)
+    
+    # 检查最后一个固定任务到一天结束的时间
+    if prev_end < day_end:
+        free_time.append((prev_end, day_end))
+    
+    return free_time
+
 def main():
     manager = ScheduleManager()
     # 首次运行时设置固定任务
@@ -499,6 +597,7 @@ def main():
         print("6. 查看总结")
         print("7. 清空所有数据并重新开始")
         print("8. 退出")
+        print("9. 自动安排今日任务")
         
         choice = input("请选择操作: ")
         
@@ -535,7 +634,8 @@ def main():
             manager.reminder_event.set()
             print("感谢使用，再见！")
             break
-        
+        elif choice == "9":
+            manager.schedule_tasks_automatically()
         else:
             print("无效的选择，请重试。")
 
