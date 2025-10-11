@@ -3,6 +3,7 @@ from fixed_task_manager import FixedTaskManager
 from timetable_manager import TimetableManager
 from summary_manager import SummaryManager
 from data_handler import DataHandler
+from clock import Clock
 
 def main():
     # 初始化各模块
@@ -89,4 +90,5 @@ def main():
             print("无效的选择，请重试。")
 
 if __name__ == "__main__":
+
     main()
