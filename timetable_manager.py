@@ -60,13 +60,14 @@ class TimetableManager:
 
         # 获取今日固定任务和待办任务
         fixed_tasks = sorted(timetable[today]["fixed"], key=lambda x: x["start"])
-        pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] in [TASK_STATUS["PENDING"], TASK_STATUS["IN_PROGRESS"]]]
+        # 修改筛查条件：只包含状态为"待处理"的任务
+        pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] == TASK_STATUS["PENDING"]]
 
         if not pending_tasks:
             print("没有待安排的任务")
             return
 
-        # 计算空闲时间和任务需求
+        # 后续逻辑保持不变...
         free_time = TimeUtils.calculate_free_time(fixed_tasks)
         total_free = sum(end - start for start, end in free_time)
         total_needed = sum(task["remaining_time"] for task in pending_tasks)
@@ -75,14 +76,10 @@ class TimetableManager:
             print(f"可用时间不足：需要{total_needed}分钟，仅{total_free}分钟可用")
             return
 
-        # 按任务时长排序（短任务优先）
         pending_tasks.sort(key=lambda x: x["remaining_time"])
-        # 合并空闲时间为连续时段
         merged_free = self._merge_free_time(free_time)
-        # 安排任务
         scheduled = self._schedule_tasks_in_free_time(merged_free, pending_tasks, total_free, total_needed)
-
-        # 输出结果
+        pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] == TASK_STATUS["PENDING"]]
         self._print_scheduled_tasks(scheduled, pending_tasks)
 
     def _merge_free_time(self, free_time):
@@ -111,13 +108,15 @@ class TimetableManager:
             if not remaining_tasks:
                 break
             period_duration = end - start
-            # 计算当前时段可安排的任务数
             max_tasks = self._calculate_max_tasks(remaining_tasks, period_duration, gap)
             if max_tasks == 0:
                 continue
-            # 安排任务
             to_schedule = remaining_tasks[:max_tasks]
             remaining_tasks = remaining_tasks[max_tasks:]
+            # 标记已安排的任务状态为"SCHEDULED"
+            for task in to_schedule:
+                task["status"] = TASK_STATUS["SCHEDULED"]  # 更新状态
+            
             scheduled.extend(self._place_tasks_in_period(start, end, to_schedule, gap))
 
         return scheduled
