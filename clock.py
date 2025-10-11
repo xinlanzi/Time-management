@@ -1,46 +1,62 @@
-import time
-import winsound  # 仅适用于Windows系统，用于提示音
+import tkinter as tk
 
-class Clock:
-    def countdown(self, minutes):
-        """倒计时函数，接收分钟数作为参数"""
-        seconds = minutes * 60
-        while seconds > 0:
-            # 计算剩余的小时、分钟和秒
-            mins, secs = divmod(seconds, 60)
-            # 格式化显示时间
-            time_format = f"{mins:02d}:{secs:02d}"
-            # 打印时间，\r使光标回到行首，实现刷新效果
-            print(f"剩余时间：{time_format}", end="\r")
-            # 暂停1秒
-            time.sleep(1)
-            seconds -= 1
+class PomodoroApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("番茄钟（Run 窗口可用）")
+        self.root.geometry("300x150")
 
-        print(f"\n{minutes}分钟计时结束！")
-        # 播放提示音，频率440Hz，持续1000毫秒
-        winsound.Beep(440, 1000)
+        self.label = tk.Label(root, text="00:00", font=("Arial", 48))
+        self.label.pack(pady=20)
 
-    def main(self):
-        print("准备开始任务")
-        print("按Ctrl+C停止程序")
+        self.status_label = tk.Label(root, text="准备开始任务", font=("Arial", 12))
+        self.status_label.pack()
 
-        try:
-            cycle = 1
-            while True:
-                print(f"===== 第{cycle}轮 =====")
-                print("开始工作！")
-                self.countdown(25)
+        self.running = False
+        self.remaining = 0
+        self.cycle = 1
 
-                print("休息时间~")
-                self.countdown(5)
+        self.start_btn = tk.Button(root, text="开始番茄钟", command=self.start_pomodoro)
+        self.start_btn.pack(side=tk.LEFT, padx=10)
 
-                print("休息时间结束，准备工作吧！")
-                cycle += 1
-                # 短暂停顿后开始下一轮
-                time.sleep(2)
-        except KeyboardInterrupt:
-            print("工作结束！！")
+        self.quit_btn = tk.Button(root, text="退出", command=self.quit_app)
+        self.quit_btn.pack(side=tk.RIGHT, padx=10)
 
-if __name__ == "__main__":
-    clock = Clock()
-    clock.main()
+    def update_time(self):
+        if self.remaining > 0 and self.running:
+            mins, secs = divmod(self.remaining, 60)
+            self.label.config(text=f"{mins:02d}:{secs:02d}")
+            self.remaining -= 1
+            self.root.after(1000, self.update_time)  # 1秒后再次调用自己
+        elif self.running:
+            # 当前阶段结束
+            self.label.config(text="00:00")
+            self.start_next_phase()
+
+    def start_next_phase(self):
+        if self.status_label.cget("text").startswith("第"):
+            # 工作阶段结束，进入休息
+            self.status_label.config(text="休息时间")
+            self.remaining = 5 * 60
+        else:
+            # 休息阶段结束，进入下一轮工作
+            self.cycle += 1
+            self.status_label.config(text=f"第 {self.cycle} 轮 - 工作中")
+            self.remaining = 25 * 60
+        self.update_time()
+
+    def start_pomodoro(self):
+        if not self.running:
+            self.running = True
+            self.status_label.config(text=f"第 {self.cycle} 轮 - 工作中")
+            self.remaining = 25 * 60
+            self.update_time()
+
+    def quit_app(self):
+        self.running = False
+        self.root.destroy()
+
+def run_pomodoro():
+    root = tk.Tk()
+    app = PomodoroApp(root)
+    root.mainloop()
