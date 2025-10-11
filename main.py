@@ -31,6 +31,7 @@ def main():
         print("7. 清空所有数据并重新开始")
         print("8. 退出")
         print("9. 自动安排今日任务")
+        print("10.启动番茄钟计时")
 
         choice = input("请选择操作: ")
 
@@ -86,9 +87,14 @@ def main():
             # 自动安排今日任务
             timetable_manager.auto_schedule_today_tasks()
 
+        elif choice == "10":
+            print("--- 启动番茄钟 ---")
+            my_clock.main()
+
         else:
             print("无效的选择，请重试。")
 
 if __name__ == "__main__":
 
     main()
+
