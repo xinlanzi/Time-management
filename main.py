@@ -3,7 +3,7 @@ from fixed_task_manager import FixedTaskManager
 from timetable_manager import TimetableManager
 from summary_manager import SummaryManager
 from data_handler import DataHandler
-from clock import Clock
+from clock import run_pomodoro
 
 def main():
     # 初始化各模块
@@ -88,9 +88,9 @@ def main():
             timetable_manager.auto_schedule_today_tasks()
 
         elif choice == "10":
-            print("--- 启动番茄钟 ---")
-            my_clock = Clock()
-            my_clock.main()
+            if __name__ == "__main__":
+                print("正在启动番茄钟...")
+                run_pomodoro()
 
         else:
             print("无效的选择，请重试。")
@@ -98,5 +98,6 @@ def main():
 if __name__ == "__main__":
 
     main()
+
 
 
