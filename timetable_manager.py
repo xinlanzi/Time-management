@@ -61,7 +61,7 @@ class TimetableManager:
         # 获取今日固定任务和待办任务
         fixed_tasks = sorted(timetable[today]["fixed"], key=lambda x: x["start"])
         # 修改筛查条件：只包含状态为"待处理"的任务
-        pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] == TASK_STATUS["PENDING"]]
+        pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] == TASK_STATUS["PENDING"] or t["status"] == TASK_STATUS["SCHEDULED"]]
 
         if not pending_tasks:
             print("没有待安排的任务")
@@ -78,8 +78,8 @@ class TimetableManager:
 
         pending_tasks.sort(key=lambda x: x["remaining_time"])
         merged_free = self._merge_free_time(free_time)
-        scheduled = self._schedule_tasks_in_free_time(merged_free, pending_tasks, total_free, total_needed)
         pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] == TASK_STATUS["PENDING"]]
+        scheduled = self._schedule_tasks_in_free_time(merged_free, pending_tasks, total_free, total_needed)
         self._print_scheduled_tasks(scheduled, pending_tasks)
 
     def _merge_free_time(self, free_time):
