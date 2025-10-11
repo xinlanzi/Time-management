@@ -58,16 +58,15 @@ class TimetableManager:
             print("无法获取今天的时间表")
             return
 
-        # 获取今日固定任务和待办任务
+        # 获取今日固定任务和待办任务（统一筛选：按需选择包含 SCHEDULED 或仅 PENDING）
         fixed_tasks = sorted(timetable[today]["fixed"], key=lambda x: x["start"])
-        # 修改筛查条件：只包含状态为"待处理"的任务
         pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] == TASK_STATUS["PENDING"] or t["status"] == TASK_STATUS["SCHEDULED"]]
 
         if not pending_tasks:
             print("没有待安排的任务")
             return
 
-        # 后续逻辑保持不变...
+        # 计算空闲时间和所需时间
         free_time = TimeUtils.calculate_free_time(fixed_tasks)
         total_free = sum(end - start for start, end in free_time)
         total_needed = sum(task["remaining_time"] for task in pending_tasks)
@@ -76,9 +75,11 @@ class TimetableManager:
             print(f"可用时间不足：需要{total_needed}分钟，仅{total_free}分钟可用")
             return
 
+        # 排序任务、合并空闲时间（删除重复的 pending_tasks 初始化）
         pending_tasks.sort(key=lambda x: x["remaining_time"])
         merged_free = self._merge_free_time(free_time)
-        pending_tasks = [t for t in timetable[today]["tasks"] if t["status"] == TASK_STATUS["PENDING"]]
+        
+        # 直接使用之前筛选好的 pending_tasks 安排
         scheduled = self._schedule_tasks_in_free_time(merged_free, pending_tasks, total_free, total_needed)
         self._print_scheduled_tasks(scheduled, pending_tasks)
 
