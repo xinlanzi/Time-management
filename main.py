@@ -89,6 +89,7 @@ def main():
 
         elif choice == "10":
             print("--- 启动番茄钟 ---")
+            my_clock = Clock()
             my_clock.main()
 
         else:
@@ -97,4 +98,5 @@ def main():
 if __name__ == "__main__":
 
     main()
+
 
