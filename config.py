@@ -12,9 +12,10 @@ DIFFICULTY_DURATION = {
 
 # 任务状态常量
 TASK_STATUS = {
-    "PENDING": "pending",
+    "PENDING": "待处理",
+    "SCHEDULED": "已安排", 
     "IN_PROGRESS": "in_progress",
-    "COMPLETED": "completed",
+    "COMPLETED": "已完成",
     "DELAYED": "delayed",
-    "ABANDONED": "abandoned"
+    "ABANDONED": "已放弃"
 }
