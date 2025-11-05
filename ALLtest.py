@@ -5,14 +5,15 @@ import requests
 import json
 from datetime import datetime, timedelta
 import pytz
+import http.client
 import threading
 import time
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 
 # ---------------------- 配置参数 ----------------------
-OPENAI_API_KEY = "your-openai-api-key"  # 替换为你的API密钥
-BASE_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_API_KEY = "sk-VRUmYADdlWqzDldwsgBheyhoQpjwomEA5rO3zA7jdS4wa2Fp"  # 替换为你的API密钥
+BASE_URL = "api.metaihub.cn"
 DB_NAME = "time_management.db"
 TIMEZONE = pytz.timezone("Asia/Shanghai")
 REMINDER_TIME = 3  # 任务开始前提醒分钟数
@@ -73,34 +74,57 @@ class AIAssistant:
     def __init__(self, api_key):
         self.api_key = api_key
         self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self.api_key}",  # 确认元AI小站是否使用Bearer前缀
+            "User-Agent": "Apifox/1.0.0(https://www.apifox.cn)",
             "Content-Type": "application/json"
         }
 
     def parse_task(self, user_input):
-        """解析任务信息"""
+        """ 解析任务信息"""
         if not self.api_key:
-            return {"error": "请配置OpenAI API密钥"}
-            
-        prompt = f"""
-        请解析以下任务描述，提取开始时间、结束时间和任务名称，
-        以JSON格式返回，包含task_name, start_time(YYYY-MM-DD HH:MM:SS), end_time(YYYY-MM-DD HH:MM:SS)
-        如果没有指定时间，默认开始时间为当前时间后30分钟，持续1小时
-        当前时间: {get_current_time()}
+            return {"error": "请配置API密钥"}
         
-        任务描述: {user_input}
+        prompt = f"""
+            请解析以下任务描述，提取开始时间、结束时间和任务名称，
+            以JSON格式返回，包含task_name, start_time(YYYY-MM-DD HH:MM:SS), end_time(YYYY-MM-DD HH:MM:SS)
+            如果没有指定时间，默认开始时间为当前时间后30分钟，持续1小时
+            当前时间: {get_current_time()}
+            
+            任务描述: {user_input}
         """
         
         try:
-            response = requests.post(
-                BASE_URL,
-                headers=self.headers,
-                json={
-                    "model": "gpt-3.5-turbo",
-                    "messages": [{"role": "user", "content": prompt}]
-                }
-            )
-            return json.loads(response.json()["choices"][0]["message"]["content"])
+            # 元AI小站的请求参数格式
+            conn = http.client.HTTPSConnection(BASE_URL)
+            conn.request("POST", "/v1/chat/completions", body=json.dumps({
+                "model": "gpt-5-codex",  # 替换为元AI小站支持的模型名称
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,  # 元AI小站可能需要的额外参数
+                "max_tokens": 2048
+            }), headers=self.headers)
+            response = conn.getresponse()
+            data = response.read()
+            json_data = json.loads(data)
+            response = json_data["choices"][0]["message"]["content"]
+
+            # response = requests.post(
+            #     BASE_URL,  # 已修改为元AI小站的API地址
+            #     headers=self.headers,
+            #     json={
+            #         "model": "gpt-5-codex",  # 替换为元AI小站支持的模型名称
+            #         "messages": [{"role": "user", "content": prompt}],
+            #         "temperature": 0.7,  # 元AI小站可能需要的额外参数
+            #         "max_tokens": 500
+            #     }
+            # )
+            
+            # 检查响应状态
+            # if response.status_code != 200:
+            #     return {"error": f"API请求失败: {response.text}"}
+                
+            # 解析响应（元AI小站的响应结构可能与OpenAI相同，若有差异需调整）
+            return response
+            # return json.loads(response.json()["choices"][0]["message"]["content"])
         except Exception as e:
             return {"error": f"解析失败: {str(e)}"}
 
