@@ -68,6 +68,7 @@ def init_database():
     conn.commit()
     conn.close()
 
+'''
 # ---------------------- AI助手类 ----------------------
 class AIAssistant:
     """AI助手类"""
@@ -89,7 +90,6 @@ class AIAssistant:
             以JSON格式返回，包含task_name, start_time(YYYY-MM-DD HH:MM:SS), end_time(YYYY-MM-DD HH:MM:SS)
             如果没有指定时间，默认开始时间为当前时间后30分钟，持续1小时
             当前时间: {get_current_time()}
-            
             任务描述: {user_input}
         """
         
@@ -123,8 +123,72 @@ class AIAssistant:
             #     return {"error": f"API请求失败: {response.text}"}
                 
             # 解析响应（元AI小站的响应结构可能与OpenAI相同，若有差异需调整）
-            return response
-            # return json.loads(response.json()["choices"][0]["message"]["content"])
+        #     return response
+        #     # return json.loads(response.json()["choices"][0]["message"]["content"])
+        # except Exception as e:
+        #     return {"error": f"解析失败: {str(e)}"}
+            return json.loads(response)  # 关键修改：将字符串解析为 JSON 对象
+        except json.JSONDecodeError:
+            return {"error": "AI 返回格式错误，无法解析为任务信息"}
+        except Exception as e:
+            return {"error": f"解析失败: {str(e)}"}
+'''
+
+class AIAssistant:
+    """AI助手类"""
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "User-Agent": "Apifox/1.0.0(https://www.apifox.cn)",
+            "Content-Type": "application/json"
+        }
+
+    def parse_task(self, user_input):
+        """解析任务信息，使用键值对格式转换为JSON"""
+        if not self.api_key:
+            return {"error": "请配置API密钥"}
+        
+        # 修改提示词，要求返回键值对格式
+        prompt = f"""
+            请解析以下任务描述，提取开始时间、结束时间和任务名称，
+            按以下格式返回（每行一个键值对，用=分隔）：
+            task_name=任务名称
+            start_time=YYYY-MM-DD HH:MM:SS
+            end_time=YYYY-MM-DD HH:MM:SS
+            如果没有指定时间，默认开始时间为当前时间后30分钟，持续1小时
+            当前时间: {get_current_time()}
+            任务描述: {user_input}
+        """
+        
+        try:
+            conn = http.client.HTTPSConnection(BASE_URL)
+            conn.request("POST", "/v1/chat/completions", body=json.dumps({
+                "model": "gpt-5-codex",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "max_tokens": 2048
+            }), headers=self.headers)
+            response = conn.getresponse()
+            data = response.read()
+            json_data = json.loads(data)
+            raw_response = json_data["choices"][0]["message"]["content"].strip()
+
+            # 解析键值对格式为字典（转换为JSON）
+            task_info = {}
+            for line in raw_response.split('\n'):
+                line = line.strip()
+                if '=' in line:
+                    key, value = line.split('=', 1)  # 只按第一个=分割
+                    task_info[key.strip()] = value.strip()
+
+            # 验证必要字段
+            required = ["task_name", "start_time", "end_time"]
+            if not all(k in task_info for k in required):
+                return {"error": "AI返回信息不完整，缺少必要字段"}
+            
+            return task_info
+
         except Exception as e:
             return {"error": f"解析失败: {str(e)}"}
 
@@ -472,6 +536,12 @@ class TimeManagementApp:
         
         if "error" in task_info:
             messagebox.showerror("错误", task_info["error"])
+            return
+            
+        # 检查必要字段是否存在
+        required_fields = ["task_name", "start_time", "end_time"]
+        if not all(field in task_info for field in required_fields):
+            messagebox.showerror("错误", "AI 返回的任务信息不完整")
             return
             
         # 确认任务信息
