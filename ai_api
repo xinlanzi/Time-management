@@ -1,0 +1,194 @@
+# ai_api.py
+# AI 调度接口：使用 http.client 调用 OpenAI 官方兼容 API，并带本地后备调度
+# 支持配置 "api.metaihub.cn" 形式的 endpoint，调用格式如用户提供代码所示
+
+import re
+from datetime import datetime, timedelta
+import uuid
+import json
+import http.client
+
+# -----------------------------
+# 配置区：远程 AI 调用配置（示例采用 api.metaihub.cn，需要自行填入 key 和模型）
+API_CONFIG = {
+    "enabled": True,  # 启用远程 AI
+    "endpoint": "api.metaihub.cn",  # 远程 API 域名
+    "path": "/v1/chat/completions",  # API 路径
+    "api_key": "sk-q2eaO1vO1proVeq49aedCzpQZqrYfc9d5gMy57XSxkLFmunA",  # <<< 请替换为你自己的 key
+    "model": "gpt-5-codex",  # <<< 请根据需要修改
+    "timeout": 15,
+}
+# ------------- end config
+
+
+def _safe_parse_iso_date(s):
+    # 尝试解析各种日期格式，同前版本
+    s = s.strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except:
+            pass
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})$", s)
+    if m:
+        mm = int(m.group(1))
+        dd = int(m.group(2))
+        now = datetime.now()
+        try:
+            dt = datetime(now.year, mm, dd)
+            if dt < now:
+                dt = datetime(now.year + 1, mm, dd)
+            return dt
+        except:
+            return None
+    return None
+
+
+class AiScheduler:
+    def __init__(self):
+        self.api_config = API_CONFIG.copy()
+
+    def _call_remote_ai(self, prompt):
+        """使用 http.client 调用远程 AI 接口，返回纯文本response"""
+        if not self.api_config.get("enabled"):
+            raise RuntimeError("Remote API not enabled in API_CONFIG.")
+
+        key = self.api_config.get("api_key")
+        model = self.api_config.get("model")
+        endpoint = self.api_config.get("endpoint")
+        path = self.api_config.get("path", "/v1/chat/completions")
+
+        payload = json.dumps(
+            {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": prompt},
+                ],
+            }
+        )
+        headers = {
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "User-Agent": "PythonHttpClient",
+        }
+
+        response_data = None
+        for retry in range(5):
+            try:
+                conn = http.client.HTTPSConnection(endpoint, timeout=self.api_config.get("timeout", 15))
+                conn.request("POST", path, payload, headers)
+                res = conn.getresponse()
+                data = res.read()
+                json_data = json.loads(data)
+
+                # 从 JSON 中提取 AI 返回的 message 内容
+                response_data = json_data["choices"][0]["message"]["content"]
+                break
+            except Exception as e:
+                if retry == 4:
+                    raise RuntimeError(f"远程 AI 调用失败：{e}")
+            finally:
+                conn.close()
+        return response_data
+
+    def parse_and_schedule(self, raw_text, fixed_slots=None):
+        fixed_slots = fixed_slots or []
+
+        # 如果远程AI可用，则先尝试调用
+        if self.api_config.get("enabled"):
+            prompt = "请将以下任务列表解析成适合排程的 JSON，字段包括 title, ddl (YYYY-MM-DD), estimate_hours (浮点小时)。\n"
+            prompt += raw_text + "\n\n固定任务（仅参考）:\n"
+            for lab, s, e in fixed_slots:
+                prompt += f"{lab} {s}-{e}\n"
+            prompt += "\n只返回 JSON 数组，不要包含解释。"
+
+            try:
+                ai_response = self._call_remote_ai(prompt)
+                parsed = json.loads(ai_response)
+                tasks = []
+                for item in parsed:
+                    tasks.append({
+                        "title": item.get("title", "未命名任务"),
+                        "ddl": item.get("ddl"),
+                        "estimate_hours": float(item.get("estimate_hours", 1.0))
+                    })
+                return self._simple_schedule(tasks, fixed_slots)
+            except Exception as e:
+                print(f"[警告] 远程API调用失败，使用本地解析器: {e}")
+
+        # 本地解析作为回退
+        tasks = self._local_parse(raw_text)
+        return self._simple_schedule(tasks, fixed_slots)
+
+    def _local_parse(self, raw_text):
+        lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+        tasks = []
+        for ln in lines:
+            title = ln
+            ddl = None
+            est = None
+
+            # ddl提取
+            mddl = re.search(
+                r"(?:ddl[:：]?\s*)(\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|\d{1,2}[-/\/]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日)",
+                ln, flags=re.IGNORECASE
+            )
+            if mddl:
+                rawddl = mddl.group(1).replace("年", "-").replace("月", "-").replace("日", "").replace("/", "-").replace(".", "-")
+                ddl = rawddl
+
+            # 时间提取
+            mest = re.search(r"(?:预计[:：]?\s*)?(\d+(\.\d+)?)(h|小时)", ln, flags=re.IGNORECASE)
+            if mest:
+                est = float(mest.group(1))
+            tasks.append({
+                "title": title or ln,
+                "ddl": ddl,
+                "estimate_hours": est or 1.0,
+            })
+        return tasks
+
+    def _simple_schedule(self, tasks, fixed_slots):
+        now = datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(minutes=30)
+
+        # 排序逻辑
+        def ddl_key(t):
+            d = t.get("ddl")
+            return _safe_parse_iso_date(d) or datetime.max
+
+        tasks_sorted = sorted(tasks, key=ddl_key)
+        scheduled = []
+        cursor = now
+
+        def in_fixed(dt):
+            for _, s, e in fixed_slots:
+                sh, sm = map(int, s.split(":"))
+                eh, em = map(int, e.split(":"))
+                start = dt.replace(hour=sh, minute=sm)
+                end = dt.replace(hour=eh, minute=em)
+                if end <= start:
+                    end += timedelta(days=1)
+                if start <= dt < end:
+                    return True, start, end
+            return False, None, None
+
+        for t in tasks_sorted:
+            dur = timedelta(hours=t["estimate_hours"])
+            while True:
+                fixed_hit, _, fixed_end = in_fixed(cursor)
+                if fixed_hit:
+                    cursor = fixed_end
+                else:
+                    break
+            start = cursor
+            end = cursor + dur
+            scheduled.append({
+                "id": str(uuid.uuid4())[:8],
+                "title": t["title"],
+                "start": start.strftime("%Y-%m-%d %H:%M"),
+                "end": end.strftime("%Y-%m-%d %H:%M"),
+                "ddl": t.get("ddl", ""),
+                "duration_hours": round(dur.total_seconds() / 3600.0, 2),
+            })
+            cursor = end + timedelta(minutes=10)
+        return scheduled
