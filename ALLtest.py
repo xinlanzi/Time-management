@@ -91,6 +91,139 @@ def init_database():
     conn.commit()
     conn.close()
 
+# ---------------------- 内存存储（用于游客模式） ----------------------
+class InMemoryStorage:
+    """内存存储类，用于游客模式的数据管理"""
+    def __init__(self):
+        self.tasks = []  # 存储格式: (task_id, task_name, start_time, end_time, status)
+        self.next_task_id = 1  # 自增ID
+    
+    def add_task(self, task_name, start_time, end_time):
+        """添加任务"""
+        # 检查时间冲突
+        for task in self.tasks:
+            _, _, s, e, status = task
+            if status != 2 and (
+                (s < end_time and e > start_time) or
+                (s < end_time and e > start_time)
+            ):
+                return False, "任务时间冲突", None
+        
+        task_id = self.next_task_id
+        self.tasks.append((task_id, task_name, start_time, end_time, 0))
+        self.next_task_id += 1
+        return True, "任务添加成功", task_id
+    
+    def get_today_tasks(self):
+        """获取今日任务"""
+        today = get_current_date()
+        return [task for task in self.tasks if task[2].startswith(today)]
+    
+    def update_task_status(self, task_id, status):
+        """更新任务状态"""
+        for i, task in enumerate(self.tasks):
+            if task[0] == task_id:
+                self.tasks[i] = (task[0], task[1], task[2], task[3], status)
+                return True, "状态更新成功"
+        return False, "任务不存在"
+    
+    def get_weekly_tasks(self):
+        """获取本周所有任务"""
+        today = datetime.now(TIMEZONE)
+        monday = today - timedelta(days=today.weekday())
+        sunday = monday + timedelta(days=6)
+        
+        start_date = monday.strftime("%Y-%m-%d")
+        end_date = sunday.strftime("%Y-%m-%d")
+        
+        weekly_tasks = []
+        for task in self.tasks:
+            task_date = task[2].split(" ")[0]
+            if start_date <= task_date <= end_date:
+                weekly_tasks.append(task)
+        
+        return weekly_tasks, start_date, end_date
+    
+    def delete_task(self, task_id):
+        """删除任务"""
+        for i, task in enumerate(self.tasks):
+            if task[0] == task_id:
+                deleted_task = self.tasks.pop(i)
+                return True, "任务已删除", deleted_task
+        return False, "任务不存在", None
+    
+    def add_recurring_tasks(self, task_name, start_time_str, end_time_str, recurrence_type, weekdays=None):
+        """添加固定重复任务"""
+        try:
+            # 解析时间部分
+            start_time = datetime.strptime(start_time_str, "%H:%M:%S").time()
+            end_time = datetime.strptime(end_time_str, "%H:%M:%S").time()
+            
+            # 获取当前月份
+            now = datetime.now(TIMEZONE)
+            year, month = now.year, now.month
+            
+            # 获取当月所有日期
+            month_days = get_days_in_month(year, month)
+            
+            # 筛选符合条件的日期
+            target_days = []
+            if recurrence_type == 'daily':
+                target_days = month_days
+            elif recurrence_type == 'weekly' and weekdays:
+                for day in month_days:
+                    if day.weekday() in weekdays:
+                        target_days.append(day)
+            
+            if not target_days:
+                return False, "没有符合条件的日期", None
+            
+            added_task_ids = []
+            for day in target_days:
+                # 组合日期和时间
+                task_start = datetime.combine(day, start_time)
+                task_end = datetime.combine(day, end_time)
+                
+                # 转换为带时区的datetime
+                task_start_tz = TIMEZONE.localize(task_start)
+                task_end_tz = TIMEZONE.localize(task_end)
+                
+                # 检查时间是否已过
+                if task_end_tz < datetime.now(TIMEZONE):
+                    continue
+                
+                # 检查冲突
+                conflict = False
+                for t in self.tasks:
+                    _, _, s, e, status = t
+                    if status != 2 and (
+                        (s < datetime_to_str(task_end_tz) and e > datetime_to_str(task_start_tz)) or
+                        (s < datetime_to_str(task_end_tz) and e > datetime_to_str(task_start_tz))
+                    ):
+                        conflict = True
+                        break
+                
+                if not conflict:
+                    task_id = self.next_task_id
+                    self.tasks.append((
+                        task_id,
+                        task_name,
+                        datetime_to_str(task_start_tz),
+                        datetime_to_str(task_end_tz),
+                        0
+                    ))
+                    added_task_ids.append(task_id)
+                    self.next_task_id += 1
+            
+            if added_task_ids:
+                return True, f"成功添加 {len(added_task_ids)} 个任务", added_task_ids
+            else:
+                return False, "没有添加任何任务，可能全部时间冲突或已过期", None
+                
+        except Exception as e:
+            return False, f"添加失败: {str(e)}", None
+
+# ---------------------- AI助手类 ----------------------
 class AIAssistant:
     """AI助手类"""
     def __init__(self, api_key):
@@ -152,18 +285,24 @@ class AIAssistant:
 # ---------------------- 任务管理类 ----------------------
 class TaskManager:
     """任务管理类"""
-    def __init__(self, user_id):
+    def __init__(self, user_id, is_guest=False):
         self.user_id = user_id
+        self.is_guest = is_guest
+        if self.is_guest:
+            self.memory_storage = InMemoryStorage()
         
     def add_task(self, task_name, start_time, end_time):
         """添加任务"""
+        if self.is_guest:
+            return self.memory_storage.add_task(task_name, start_time, end_time)
+            
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
         try:
             # 检查时间冲突
             if self.check_conflict(start_time, end_time):
-                return False, "任务时间冲突"
+                return False, "任务时间冲突", None
                 
             cursor.execute('''
                 INSERT INTO tasks (user_id, task_name, start_time, end_time, create_time)
@@ -179,6 +318,16 @@ class TaskManager:
     
     def check_conflict(self, start_time, end_time):
         """检查时间冲突"""
+        if self.is_guest:
+            for task in self.memory_storage.tasks:
+                _, _, s, e, status = task
+                if status != 2 and (
+                    (s < end_time and e > start_time) or
+                    (s < end_time and e > start_time)
+                ):
+                    return True
+            return False
+            
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
@@ -197,6 +346,9 @@ class TaskManager:
     
     def get_today_tasks(self):
         """获取今日任务"""
+        if self.is_guest:
+            return self.memory_storage.get_today_tasks()
+            
         today = get_current_date()
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -214,6 +366,9 @@ class TaskManager:
     
     def update_task_status(self, task_id, status):
         """更新任务状态"""
+        if self.is_guest:
+            return self.memory_storage.update_task_status(task_id, status)
+            
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
@@ -231,6 +386,9 @@ class TaskManager:
 
     def get_weekly_tasks(self):
         """获取本周所有任务（从周一到周日）"""
+        if self.is_guest:
+            return self.memory_storage.get_weekly_tasks()
+            
         today = datetime.now(TIMEZONE)
         # 计算本周一的日期
         monday = today - timedelta(days=today.weekday())
@@ -258,6 +416,9 @@ class TaskManager:
     
     def delete_task(self, task_id):
         """删除任务并返回被删除的任务信息用于撤销"""
+        if self.is_guest:
+            return self.memory_storage.delete_task(task_id)
+            
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
@@ -284,12 +445,13 @@ class TaskManager:
         finally:
             conn.close()
 
-        def add_recurring_tasks(self, task_name, start_time_str, end_time_str, recurrence_type, weekdays=None):
-            """
-            添加固定重复任务
-            recurrence_type: 'daily' 或 'weekly'
-            weekdays: 当recurrence_type为'weekly'时，是星期几的列表(0-6, 0=周一)
-            """
+    def add_recurring_tasks(self, task_name, start_time_str, end_time_str, recurrence_type, weekdays=None):
+        """添加固定重复任务"""
+        if self.is_guest:
+            return self.memory_storage.add_recurring_tasks(
+                task_name, start_time_str, end_time_str, recurrence_type, weekdays
+            )
+            
         try:
             # 解析时间部分（忽略日期）
             start_time = datetime.strptime(start_time_str, "%H:%M:%S").time()
@@ -369,7 +531,9 @@ class TaskManager:
 class UserManager:
     """用户管理类"""
     def __init__(self):
-        self.current_user = None
+        self.current_user = None  # 格式: (user_id, username, is_guest)
+        self.guest_user_id = -1
+        self.guest_username = "游客"
         
     def login(self, username, password):
         """登录"""
@@ -384,7 +548,7 @@ class UserManager:
         conn.close()
         
         if user:
-            self.current_user = (user[0], user[1])
+            self.current_user = (user[0], user[1], False)
             return True, "登录成功"
         return False, "用户名或密码错误"
     
@@ -409,6 +573,11 @@ class UserManager:
         """登出"""
         self.current_user = None
         return True, "登出成功"
+    
+    def enter_guest_mode(self):
+        """进入游客模式"""
+        self.current_user = (self.guest_user_id, self.guest_username, True)
+        return True, "已进入游客模式"
 
 # ---------------------- 主应用类 ----------------------
 class TimeManagementApp:
@@ -466,6 +635,21 @@ class TimeManagementApp:
         
         ttk.Button(btn_frame, text="登录", command=self.login).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_frame, text="注册", command=self.register).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="游客登录", command=self.enter_guest_mode).pack(side=tk.LEFT, padx=10)
+    
+    def enter_guest_mode(self):
+        """进入游客模式"""
+        success, msg = self.user_manager.enter_guest_mode()
+        messagebox.showinfo("提示", msg)
+        
+        if success:
+            # 初始化游客模式的任务管理器
+            self.task_manager = TaskManager(
+                self.user_manager.current_user[0], 
+                is_guest=self.user_manager.current_user[2]
+            )
+            self.undo_stack = []  # 清空撤销栈
+            self.create_main_ui()
     
     def create_main_ui(self):
         """创建主界面"""
@@ -480,7 +664,8 @@ class TimeManagementApp:
         self.time_label.pack(side=tk.LEFT)
         
         # 用户信息和登出按钮
-        ttk.Label(top_frame, text=f"当前用户: {self.user_manager.current_user[1]}").pack(side=tk.RIGHT, padx=10)
+        user_type = "游客" if self.user_manager.current_user[2] else "用户"
+        ttk.Label(top_frame, text=f"当前{user_type}: {self.user_manager.current_user[1]}").pack(side=tk.RIGHT, padx=10)
         ttk.Button(top_frame, text="登出", command=self.logout).pack(side=tk.RIGHT)
         
         # 中间框架 - 任务列表
@@ -784,7 +969,10 @@ class TimeManagementApp:
         messagebox.showinfo("登录结果", msg)
         
         if success:
-            self.task_manager = TaskManager(self.user_manager.current_user[0])
+            self.task_manager = TaskManager(
+                self.user_manager.current_user[0],
+                is_guest=self.user_manager.current_user[2]
+            )
             self.undo_stack = []  # 清空撤销栈
             self.create_main_ui()
     
@@ -926,27 +1114,36 @@ class TimeManagementApp:
         task_info = self.undo_stack.pop()
         task_id, task_name, start_time, end_time, status = task_info
         
-        # 重新添加任务
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute('''
-                INSERT INTO tasks (task_id, user_id, task_name, start_time, end_time, status, create_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (task_id, self.user_manager.current_user[0], task_name, start_time, end_time, status, get_current_time()))
-            conn.commit()
+        if self.user_manager.current_user[2]:  # 游客模式
+            # 重新添加到内存
+            self.task_manager.memory_storage.tasks.append(task_info)
             messagebox.showinfo("提示", f"已撤销删除：{task_name}")
-            
-            # 刷新任务列表
             self.refresh_tasks()
             if self.weekly_window:
                 self.weekly_window.destroy()
                 self.view_weekly_tasks()
-        except Exception as e:
-            messagebox.showerror("错误", f"撤销失败: {str(e)}")
-        finally:
-            conn.close()
+        else:  # 普通用户
+            # 重新添加到数据库
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            
+            try:
+                cursor.execute('''
+                    INSERT INTO tasks (task_id, user_id, task_name, start_time, end_time, status, create_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (task_id, self.user_manager.current_user[0], task_name, start_time, end_time, status, get_current_time()))
+                conn.commit()
+                messagebox.showinfo("提示", f"已撤销删除：{task_name}")
+                
+                # 刷新任务列表
+                self.refresh_tasks()
+                if self.weekly_window:
+                    self.weekly_window.destroy()
+                    self.view_weekly_tasks()
+            except Exception as e:
+                messagebox.showerror("错误", f"撤销失败: {str(e)}")
+            finally:
+                conn.close()
 
 # ---------------------- 程序入口 ----------------------
 if __name__ == "__main__":
