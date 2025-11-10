@@ -35,6 +35,29 @@ def datetime_to_str(dt):
     """datetime对象转字符串"""
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
+def get_days_in_month(year, month):
+    """获取指定月份的所有日期"""
+    if month == 12:
+        next_month = 1
+        next_year = year + 1
+    else:
+        next_month = month + 1
+        next_year = year
+    
+    # 获取当月第一天
+    first_day = datetime(year, month, 1)
+    # 获取下个月第一天
+    next_first_day = datetime(next_year, next_month, 1)
+    # 计算当月天数
+    days_in_month = (next_first_day - first_day).days
+    
+    return [datetime(year, month, day) for day in range(1, days_in_month + 1)]
+
+def get_weekday_name(weekday):
+    """将0-6的星期数转换为中文星期名"""
+    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    return weekdays[weekday]
+
 # ---------------------- 数据库初始化 ----------------------
 def init_database():
     """初始化数据库"""
@@ -67,72 +90,6 @@ def init_database():
     
     conn.commit()
     conn.close()
-
-'''
-# ---------------------- AI助手类 ----------------------
-class AIAssistant:
-    """AI助手类"""
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",  # 确认元AI小站是否使用Bearer前缀
-            "User-Agent": "Apifox/1.0.0(https://www.apifox.cn)",
-            "Content-Type": "application/json"
-        }
-
-    def parse_task(self, user_input):
-        """ 解析任务信息"""
-        if not self.api_key:
-            return {"error": "请配置API密钥"}
-        
-        prompt = f"""
-            请解析以下任务描述，提取开始时间、结束时间和任务名称，
-            以JSON格式返回，包含task_name, start_time(YYYY-MM-DD HH:MM:SS), end_time(YYYY-MM-DD HH:MM:SS)
-            如果没有指定时间，默认开始时间为当前时间后30分钟，持续1小时
-            当前时间: {get_current_time()}
-            任务描述: {user_input}
-        """
-        
-        try:
-            # 元AI小站的请求参数格式
-            conn = http.client.HTTPSConnection(BASE_URL)
-            conn.request("POST", "/v1/chat/completions", body=json.dumps({
-                "model": "gpt-5-codex",  # 替换为元AI小站支持的模型名称
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,  # 元AI小站可能需要的额外参数
-                "max_tokens": 2048
-            }), headers=self.headers)
-            response = conn.getresponse()
-            data = response.read()
-            json_data = json.loads(data)
-            response = json_data["choices"][0]["message"]["content"]
-
-            # response = requests.post(
-            #     BASE_URL,  # 已修改为元AI小站的API地址
-            #     headers=self.headers,
-            #     json={
-            #         "model": "gpt-5-codex",  # 替换为元AI小站支持的模型名称
-            #         "messages": [{"role": "user", "content": prompt}],
-            #         "temperature": 0.7,  # 元AI小站可能需要的额外参数
-            #         "max_tokens": 500
-            #     }
-            # )
-            
-            # 检查响应状态
-            # if response.status_code != 200:
-            #     return {"error": f"API请求失败: {response.text}"}
-                
-            # 解析响应（元AI小站的响应结构可能与OpenAI相同，若有差异需调整）
-        #     return response
-        #     # return json.loads(response.json()["choices"][0]["message"]["content"])
-        # except Exception as e:
-        #     return {"error": f"解析失败: {str(e)}"}
-            return json.loads(response)  # 关键修改：将字符串解析为 JSON 对象
-        except json.JSONDecodeError:
-            return {"error": "AI 返回格式错误，无法解析为任务信息"}
-        except Exception as e:
-            return {"error": f"解析失败: {str(e)}"}
-'''
 
 class AIAssistant:
     """AI助手类"""
@@ -213,9 +170,10 @@ class TaskManager:
                 VALUES (?, ?, ?, ?, ?)
             ''', (self.user_id, task_name, start_time, end_time, get_current_time()))
             conn.commit()
-            return True, "任务添加成功"
+            task_id = cursor.lastrowid  # 获取刚插入的任务ID
+            return True, "任务添加成功", task_id
         except Exception as e:
-            return False, f"添加失败: {str(e)}"
+            return False, f"添加失败: {str(e)}", None
         finally:
             conn.close()
     
@@ -297,6 +255,115 @@ class TaskManager:
         tasks = cursor.fetchall()
         conn.close()
         return tasks, start_date, end_date
+    
+    def delete_task(self, task_id):
+        """删除任务并返回被删除的任务信息用于撤销"""
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        try:
+            # 先查询任务信息
+            cursor.execute(
+                "SELECT task_name, start_time, end_time, status FROM tasks WHERE task_id=? AND user_id=?",
+                (task_id, self.user_id)
+            )
+            task = cursor.fetchone()
+            if not task:
+                return False, "任务不存在", None
+                
+            # 删除任务
+            cursor.execute(
+                "DELETE FROM tasks WHERE task_id=? AND user_id=?",
+                (task_id, self.user_id)
+            )
+            conn.commit()
+            # 返回被删除的任务信息
+            return True, "任务已删除", (task_id, task[0], task[1], task[2], task[3])
+        except Exception as e:
+            return False, f"删除失败: {str(e)}", None
+        finally:
+            conn.close()
+
+        def add_recurring_tasks(self, task_name, start_time_str, end_time_str, recurrence_type, weekdays=None):
+            """
+            添加固定重复任务
+            recurrence_type: 'daily' 或 'weekly'
+            weekdays: 当recurrence_type为'weekly'时，是星期几的列表(0-6, 0=周一)
+            """
+        try:
+            # 解析时间部分（忽略日期）
+            start_time = datetime.strptime(start_time_str, "%H:%M:%S").time()
+            end_time = datetime.strptime(end_time_str, "%H:%M:%S").time()
+            
+            # 获取当前月份
+            now = datetime.now(TIMEZONE)
+            year, month = now.year, now.month
+            
+            # 获取当月所有日期
+            month_days = get_days_in_month(year, month)
+            
+            # 筛选符合条件的日期
+            target_days = []
+            if recurrence_type == 'daily':
+                # 每天都添加
+                target_days = month_days
+            elif recurrence_type == 'weekly' and weekdays:
+                # 只添加指定星期几的日期
+                for day in month_days:
+                    # weekday()返回0-6，0是周一
+                    if day.weekday() in weekdays:
+                        target_days.append(day)
+            
+            if not target_days:
+                return False, "没有符合条件的日期"
+            
+            # 批量添加任务
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            
+            # 记录添加成功的任务ID
+            added_task_ids = []
+            
+            for day in target_days:
+                # 组合日期和时间
+                task_start = datetime.combine(day, start_time)
+                task_end = datetime.combine(day, end_time)
+                
+                # 转换为带时区的datetime
+                task_start_tz = TIMEZONE.localize(task_start)
+                task_end_tz = TIMEZONE.localize(task_end)
+                
+                # 检查时间是否已过
+                if task_end_tz < datetime.now(TIMEZONE):
+                    continue
+                
+                # 检查冲突
+                if not self.check_conflict(
+                    datetime_to_str(task_start_tz), 
+                    datetime_to_str(task_end_tz)
+                ):
+                    cursor.execute('''
+                        INSERT INTO tasks (user_id, task_name, start_time, end_time, create_time)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (
+                        self.user_id, 
+                        task_name, 
+                        datetime_to_str(task_start_tz), 
+                        datetime_to_str(task_end_tz), 
+                        get_current_time()
+                    ))
+                    added_task_ids.append(cursor.lastrowid)
+            
+            conn.commit()
+            conn.close()
+            
+            if added_task_ids:
+                return True, f"成功添加 {len(added_task_ids)} 个任务", added_task_ids
+            else:
+                return False, "没有添加任何任务，可能全部时间冲突或已过期"
+                
+        except Exception as e:
+            return False, f"添加失败: {str(e)}", None
 
 # ---------------------- 用户管理类 ----------------------
 class UserManager:
@@ -357,6 +424,10 @@ class TimeManagementApp:
         self.ai_assistant = AIAssistant(OPENAI_API_KEY)
         self.task_manager = None
         
+        # 撤销功能相关
+        self.undo_stack = []  # 存储被删除的任务信息用于撤销
+        self.weekly_window = None  # 用于引用每周任务窗口
+        
         # 初始化数据库
         init_database()
         
@@ -366,6 +437,9 @@ class TimeManagementApp:
         # 实时时间更新
         self.time_label = None
         self.update_time()
+        
+        # 绑定Ctrl+Z快捷键
+        self.root.bind("<Control-z>", self.undo_delete)
     
     def create_login_ui(self):
         """创建登录界面"""
@@ -416,12 +490,19 @@ class TimeManagementApp:
         ttk.Label(mid_frame, text="今日任务", font=("Arial", 16)).pack(anchor=tk.W, pady=10)
         
         # 任务列表
-        columns = ("id", "任务名称", "开始时间", "结束时间", "状态", "操作")
+        columns = ("id", "任务名称", "开始时间", "结束时间", "状态", "操作", "删除")
         self.task_tree = ttk.Treeview(mid_frame, columns=columns, show="headings")
         
         for col in columns:
             self.task_tree.heading(col, text=col)
-            width = 50 if col == "id" else 150 if col in ["开始时间", "结束时间"] else 100
+            if col == "id":
+                width = 50
+            elif col in ["开始时间", "结束时间"]:
+                width = 150
+            elif col in ["操作", "删除"]:
+                width = 80
+            else:
+                width = 100
             self.task_tree.column(col, width=width, anchor=tk.CENTER)
         
         self.task_tree.pack(expand=True, fill=tk.BOTH)
@@ -433,10 +514,8 @@ class TimeManagementApp:
         ttk.Button(btn_frame, text="添加任务", command=self.add_task_dialog).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_frame, text="AI智能添加", command=self.ai_add_task).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="刷新任务", command=self.refresh_tasks).pack(side=tk.RIGHT, padx=10)
-
-        # 新增：查看每周任务按钮
         ttk.Button(btn_frame, text="查看每周任务", command=self.view_weekly_tasks).pack(side=tk.LEFT, padx=10)
-        ttk.Button(btn_frame, text="刷新任务", command=self.refresh_tasks).pack(side=tk.RIGHT, padx=10)
+        ttk.Button(btn_frame, text="添加固定任务", command=self.add_recurring_task_dialog).pack(side=tk.LEFT, padx=10)
         
         # 加载任务
         self.refresh_tasks()
@@ -444,6 +523,100 @@ class TimeManagementApp:
         # 绑定任务列表事件
         self.task_tree.bind("<ButtonRelease-1>", self.on_task_click)
     
+    def add_recurring_task_dialog(self):
+        """添加固定任务对话框"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("添加固定任务")
+        dialog.geometry("400x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(expand=True, fill=tk.BOTH)
+        
+        # 任务名称
+        ttk.Label(frame, text="任务名称:").pack(anchor=tk.W, pady=5)
+        name_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=name_var, width=40).pack(pady=5)
+        
+        # 重复类型
+        ttk.Label(frame, text="重复类型:").pack(anchor=tk.W, pady=5)
+        recurrence_var = tk.StringVar(value="daily")
+        recurrence_frame = ttk.Frame(frame)
+        recurrence_frame.pack(fill=tk.X, pady=5)
+        ttk.Radiobutton(recurrence_frame, text="每天", variable=recurrence_var, value="daily").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(recurrence_frame, text="每周", variable=recurrence_var, value="weekly").pack(side=tk.LEFT, padx=10)
+        
+        # 每周重复选项
+        self.weekday_vars = [tk.BooleanVar() for _ in range(7)]
+        weekday_frame = ttk.Frame(frame)
+        weekday_frame.pack(fill=tk.X, pady=5)
+        
+        for i in range(7):
+            ttk.Checkbutton(
+                weekday_frame, 
+                text=get_weekday_name(i), 
+                variable=self.weekday_vars[i]
+            ).pack(side=tk.LEFT, padx=5)
+        
+        # 开始时间（仅时间部分）
+        ttk.Label(frame, text="开始时间 (HH:MM:SS):").pack(anchor=tk.W, pady=5)
+        start_var = tk.StringVar(value="09:00:00")
+        ttk.Entry(frame, textvariable=start_var, width=40).pack(pady=5)
+        
+        # 结束时间（仅时间部分）
+        ttk.Label(frame, text="结束时间 (HH:MM:SS):").pack(anchor=tk.W, pady=5)
+        end_var = tk.StringVar(value="10:00:00")
+        ttk.Entry(frame, textvariable=end_var, width=40).pack(pady=5)
+        
+        # 按钮
+        def save_recurring_task():
+            name = name_var.get()
+            recurrence_type = recurrence_var.get()
+            start_time = start_var.get()
+            end_time = end_var.get()
+            
+            if not name or not start_time or not end_time:
+                messagebox.showwarning("警告", "请填写所有字段")
+                return
+                
+            # 验证时间格式
+            try:
+                datetime.strptime(start_time, "%H:%M:%S")
+                datetime.strptime(end_time, "%H:%M:%S")
+            except ValueError:
+                messagebox.showwarning("警告", "时间格式不正确，请使用HH:MM:SS")
+                return
+                
+            # 处理每周重复的情况
+            weekdays = None
+            if recurrence_type == "weekly":
+                weekdays = [i for i in range(7) if self.weekday_vars[i].get()]
+                if not weekdays:
+                    messagebox.showwarning("警告", "请至少选择一个星期几")
+                    return
+            
+            # 添加固定任务
+            success, msg, _ = self.task_manager.add_recurring_tasks(
+                name, start_time, end_time, recurrence_type, weekdays
+            )
+            messagebox.showinfo("结果", msg)
+            if success:
+                dialog.destroy()
+                self.refresh_tasks()
+        
+        ttk.Button(frame, text="保存", command=save_recurring_task).pack(pady=10)
+        
+        # 绑定重复类型变化事件，控制星期选择框的状态
+        def toggle_weekday_frame(*args):
+            state = "normal" if recurrence_var.get() == "weekly" else "disabled"
+            for child in weekday_frame.winfo_children():
+                child.config(state=state)
+        
+        recurrence_var.trace_add("write", toggle_weekday_frame)
+        # 初始状态设置
+        toggle_weekday_frame()
+
     def update_time(self):
         """更新时间显示"""
         current_time = get_current_time()
@@ -472,7 +645,7 @@ class TimeManagementApp:
             # 根据状态设置颜色
             tag = "completed" if status == 2 else "in_progress" if status == 1 else ""
             self.task_tree.insert("", tk.END, values=(
-                task_id, name, start.split(" ")[1], end.split(" ")[1], status_text, "操作"
+                task_id, name, start.split(" ")[1], end.split(" ")[1], status_text, "更改", "删除"
             ), tags=(tag,))
         
         # 设置标签样式
@@ -500,6 +673,10 @@ class TimeManagementApp:
                 self.task_manager.update_task_status(task_id, 0)
                 
             self.refresh_tasks()
+        elif column == 7:  # 删除列
+            task_id = self.task_tree.item(item, "values")[0]
+            task_name = self.task_tree.item(item, "values")[1]
+            self.confirm_delete(task_id, task_name, is_weekly=False)
     
     def add_task_dialog(self):
         """添加任务对话框"""
@@ -537,7 +714,7 @@ class TimeManagementApp:
                 messagebox.showwarning("警告", "请填写所有字段")
                 return
                 
-            success, msg = self.task_manager.add_task(name, start, end)
+            success, msg, _ = self.task_manager.add_task(name, start, end)
             messagebox.showinfo("结果", msg)
             if success:
                 dialog.destroy()
@@ -585,7 +762,7 @@ class TimeManagementApp:
         """
         
         if messagebox.askyesno("确认任务", confirm_msg):
-            success, msg = self.task_manager.add_task(
+            success, msg, _ = self.task_manager.add_task(
                 task_info['task_name'],
                 task_info['start_time'],
                 task_info['end_time']
@@ -608,6 +785,7 @@ class TimeManagementApp:
         
         if success:
             self.task_manager = TaskManager(self.user_manager.current_user[0])
+            self.undo_stack = []  # 清空撤销栈
             self.create_main_ui()
     
     def register(self):
@@ -642,19 +820,29 @@ class TimeManagementApp:
         tasks, start_date, end_date = self.task_manager.get_weekly_tasks()
         
         # 创建周任务窗口
-        weekly_window = tk.Toplevel(self.root)
-        weekly_window.title(f"每周任务 ({start_date} 至 {end_date})")
-        weekly_window.geometry("800x600")
-        weekly_window.transient(self.root)
-        weekly_window.grab_set()
+        self.weekly_window = tk.Toplevel(self.root)
+        self.weekly_window.title(f"每周任务 ({start_date} 至 {end_date})")
+        self.weekly_window.geometry("800x600")
+        self.weekly_window.transient(self.root)
+        self.weekly_window.grab_set()
+        
+        # 绑定Ctrl+Z快捷键到每周任务窗口
+        self.weekly_window.bind("<Control-z>", self.undo_delete)
         
         # 任务列表
-        columns = ("id", "任务名称", "开始时间", "结束时间", "状态", "操作")
-        weekly_tree = ttk.Treeview(weekly_window, columns=columns, show="headings")
+        columns = ("id", "任务名称", "开始时间", "结束时间", "状态", "操作", "删除")
+        weekly_tree = ttk.Treeview(self.weekly_window, columns=columns, show="headings")
         
         for col in columns:
             weekly_tree.heading(col, text=col)
-            width = 50 if col == "id" else 150 if col in ["开始时间", "结束时间"] else 100
+            if col == "id":
+                width = 50
+            elif col in ["开始时间", "结束时间"]:
+                width = 150
+            elif col in ["操作", "删除"]:
+                width = 80
+            else:
+                width = 100
             weekly_tree.column(col, width=width, anchor=tk.CENTER)
         
         # 添加任务数据
@@ -666,7 +854,7 @@ class TimeManagementApp:
             # 根据状态设置颜色
             tag = "completed" if status == 2 else "in_progress" if status == 1 else ""
             weekly_tree.insert("", tk.END, values=(
-                task_id, name, start, end, status_text, "操作"
+                task_id, name, start, end, status_text, "更改", "删除"
             ), tags=(tag,))
         
         # 设置标签样式
@@ -696,16 +884,69 @@ class TimeManagementApp:
                     self.task_manager.update_task_status(task_id, 0)
                     
                 # 刷新当前窗口和主窗口的任务列表
-                weekly_window.destroy()
+                self.weekly_window.destroy()
                 self.view_weekly_tasks()
                 self.refresh_tasks()
+            elif column == 7:  # 删除列
+                task_id = weekly_tree.item(item, "values")[0]
+                task_name = weekly_tree.item(item, "values")[1]
+                self.confirm_delete(task_id, task_name, is_weekly=True)
         
         weekly_tree.bind("<ButtonRelease-1>", on_weekly_task_click)
         
         # 底部按钮
-        btn_frame = ttk.Frame(weekly_window, padding="10")
+        btn_frame = ttk.Frame(self.weekly_window, padding="10")
         btn_frame.pack(fill=tk.X)
-        ttk.Button(btn_frame, text="关闭", command=weekly_window.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btn_frame, text="关闭", command=self.weekly_window.destroy).pack(side=tk.RIGHT)
+    
+    def confirm_delete(self, task_id, task_name, is_weekly):
+        """确认删除任务"""
+        if messagebox.askyesno("确认删除", f"确定要删除任务 '{task_name}' 吗？"):
+            success, msg, deleted_task = self.task_manager.delete_task(task_id)
+            if success:
+                # 将删除的任务信息存入撤销栈
+                self.undo_stack.append(deleted_task)
+                messagebox.showinfo("提示", msg)
+                
+                # 刷新任务列表
+                self.refresh_tasks()
+                if is_weekly and self.weekly_window:
+                    self.weekly_window.destroy()
+                    self.view_weekly_tasks()
+            else:
+                messagebox.showerror("错误", msg)
+    
+    def undo_delete(self, event=None):
+        """撤销删除操作 (Ctrl+Z)"""
+        if not self.undo_stack:
+            messagebox.showinfo("提示", "没有可撤销的操作")
+            return
+            
+        # 从撤销栈中取出最近删除的任务
+        task_info = self.undo_stack.pop()
+        task_id, task_name, start_time, end_time, status = task_info
+        
+        # 重新添加任务
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO tasks (task_id, user_id, task_name, start_time, end_time, status, create_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (task_id, self.user_manager.current_user[0], task_name, start_time, end_time, status, get_current_time()))
+            conn.commit()
+            messagebox.showinfo("提示", f"已撤销删除：{task_name}")
+            
+            # 刷新任务列表
+            self.refresh_tasks()
+            if self.weekly_window:
+                self.weekly_window.destroy()
+                self.view_weekly_tasks()
+        except Exception as e:
+            messagebox.showerror("错误", f"撤销失败: {str(e)}")
+        finally:
+            conn.close()
 
 # ---------------------- 程序入口 ----------------------
 if __name__ == "__main__":
