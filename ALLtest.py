@@ -53,6 +53,14 @@ def get_days_in_month(year, month):
     
     return [datetime(year, month, day) for day in range(1, days_in_month + 1)]
 
+def is_time_expired(time_str):
+    """判断时间是否已过期"""
+    try:
+        task_time = str_to_datetime(time_str)
+        return task_time < datetime.now(TIMEZONE)
+    except:
+        return False
+
 def get_weekday_name(weekday):
     """将0-6的星期数转换为中文星期名"""
     weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -234,19 +242,29 @@ class AIAssistant:
             "Content-Type": "application/json"
         }
 
-    def parse_task(self, user_input):
-        """解析任务信息，使用键值对格式转换为JSON"""
+    def parse_task(self, user_input, historical_tasks=None):
+        """解析任务信息，结合历史任务数据给出合理时间建议"""
         if not self.api_key:
             return {"error": "请配置API密钥"}
         
-        # 修改提示词，要求返回键值对格式
+        # 构建历史任务提示信息
+        history_prompt = ""
+        if historical_tasks:
+            history_prompt = "用户历史任务安排参考：\n"
+            for task in historical_tasks[:5]:  # 取最近5个任务作为参考
+                task_id, name, start, end, status = task
+                history_prompt += f"- {name}: {start} 至 {end}\n"
+            history_prompt += "\n请参考用户的历史任务时间安排习惯，推荐合理的任务时间，避免冲突\n"
+        
+        # 提示词优化，加入历史任务参考
         prompt = f"""
-            请解析以下任务描述，提取开始时间、结束时间和任务名称，
+            {history_prompt}
+            请解析以下任务描述，提取或推荐合适的开始时间、结束时间和任务名称，
             按以下格式返回（每行一个键值对，用=分隔）：
             task_name=任务名称
             start_time=YYYY-MM-DD HH:MM:SS
             end_time=YYYY-MM-DD HH:MM:SS
-            如果没有指定时间，默认开始时间为当前时间后30分钟，持续1小时
+            如果没有指定时间，请根据用户历史习惯推荐合理的时间，默认时长1小时
             当前时间: {get_current_time()}
             任务描述: {user_input}
         """
@@ -256,7 +274,7 @@ class AIAssistant:
             conn.request("POST", "/v1/chat/completions", body=json.dumps({
                 "model": "gpt-5-codex",
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
+                "temperature": 0.3,  # 降低随机性，提高时间安排的合理性
                 "max_tokens": 2048
             }), headers=self.headers)
             response = conn.getresponse()
@@ -264,12 +282,12 @@ class AIAssistant:
             json_data = json.loads(data)
             raw_response = json_data["choices"][0]["message"]["content"].strip()
 
-            # 解析键值对格式为字典（转换为JSON）
+            # 解析键值对格式为字典
             task_info = {}
             for line in raw_response.split('\n'):
                 line = line.strip()
                 if '=' in line:
-                    key, value = line.split('=', 1)  # 只按第一个=分割
+                    key, value = line.split('=', 1)
                     task_info[key.strip()] = value.strip()
 
             # 验证必要字段
@@ -345,24 +363,46 @@ class TaskManager:
         return conflict
     
     def get_today_tasks(self):
-        """获取今日任务"""
+        """获取今日任务，包含超时判断"""
         if self.is_guest:
-            return self.memory_storage.get_today_tasks()
+            tasks = self.memory_storage.get_today_tasks()
+        else:
+            today = get_current_date()
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
             
-        today = get_current_date()
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+            cursor.execute('''
+                SELECT task_id, task_name, start_time, end_time, status 
+                FROM tasks 
+                WHERE user_id=? AND start_time LIKE ? 
+                ORDER BY start_time
+            ''', (self.user_id, f"{today}%"))
+            
+            tasks = cursor.fetchall()
+            conn.close()
         
-        cursor.execute('''
-            SELECT task_id, task_name, start_time, end_time, status 
-            FROM tasks 
-            WHERE user_id=? AND start_time LIKE ? 
-            ORDER BY start_time
-        ''', (self.user_id, f"{today}%"))
+        # 检查并更新已超时但未完成的任务状态
+        updated_tasks = []
+        for task in tasks:
+            task_id, name, start, end, status = task
+            # 3表示已超时状态
+            if status in [0, 1] and is_time_expired(end):
+                if self.is_guest:
+                    self.memory_storage.update_task_status(task_id, 3)
+                else:
+                    conn = sqlite3.connect(DB_NAME)
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE tasks SET status=3 WHERE task_id=? AND user_id=?",
+                        (task_id, self.user_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                updated_tasks.append((task_id, name, start, end, 3))
+            else:
+                updated_tasks.append(task)
         
-        tasks = cursor.fetchall()
-        conn.close()
-        return tasks
+        return updated_tasks
     
     def update_task_status(self, task_id, status):
         """更新任务状态"""
@@ -811,7 +851,7 @@ class TimeManagementApp:
         self.root.after(1000, self.update_time)
     
     def refresh_tasks(self):
-        """刷新任务列表"""
+        """刷新任务列表，包含超时任务处理"""
         if not self.user_manager.current_user:
             return
             
@@ -821,24 +861,29 @@ class TimeManagementApp:
             
         # 获取今日任务
         tasks = self.task_manager.get_today_tasks()
-        status_map = {0: "未开始", 1: "进行中", 2: "已完成"}
+        # 添加"已超时"和"已拖延"状态
+        status_map = {0: "未开始", 1: "进行中", 2: "已完成", 3: "已超时", 4: "已拖延"}
         
         for task in tasks:
             task_id, name, start, end, status = task
             status_text = status_map.get(status, "未知")
             
             # 根据状态设置颜色
-            tag = "completed" if status == 2 else "in_progress" if status == 1 else ""
+            tag = "completed" if status == 2 else "in_progress" if status == 1 else \
+                "expired" if status == 3 else "delayed" if status == 4 else ""
             self.task_tree.insert("", tk.END, values=(
-                task_id, name, start.split(" ")[1], end.split(" ")[1], status_text, "更改", "删除"
+                task_id, name, start.split(" ")[1], end.split(" ")[1], status_text, 
+                "重新添加" if status == 3 else "更改", "删除"
             ), tags=(tag,))
         
         # 设置标签样式
         self.task_tree.tag_configure("completed", foreground="gray")
         self.task_tree.tag_configure("in_progress", foreground="blue")
-    
+        self.task_tree.tag_configure("expired", foreground="red")  # 超时任务红色显示
+        self.task_tree.tag_configure("delayed", foreground="orange")  # 拖延任务橙色显示
+        
     def on_task_click(self, event):
-        """任务列表点击事件"""
+        """任务列表点击事件，包含重新添加功能"""
         region = self.task_tree.identify_region(event.x, event.y)
         item = self.task_tree.identify_row(event.y)
         
@@ -846,20 +891,57 @@ class TimeManagementApp:
             return
             
         column = int(self.task_tree.identify_column(event.x).replace("#", ""))
+        task_id = self.task_tree.item(item, "values")[0]
+        status_text = self.task_tree.item(item, "values")[4]
+        
         if column == 6:  # 操作列
-            task_id = self.task_tree.item(item, "values")[0]
-            status = self.task_tree.item(item, "values")[4]
-            
-            if status == "未开始":
-                self.task_manager.update_task_status(task_id, 1)
-            elif status == "进行中":
-                self.task_manager.update_task_status(task_id, 2)
-            elif status == "已完成":
-                self.task_manager.update_task_status(task_id, 0)
+            # 处理超时任务的重新添加
+            if status_text == "已超时":
+                # 获取原任务信息
+                task_name = self.task_tree.item(item, "values")[1]
+                original_start = self.task_tree.item(item, "values")[2]
+                original_end = self.task_tree.item(item, "values")[3]
                 
-            self.refresh_tasks()
+                # 计算新时间（默认延后1小时）
+                now = datetime.now(TIMEZONE)
+                new_start = datetime_to_str(now)
+                new_end = datetime_to_str(now + timedelta(hours=1))
+                
+                # 确认重新添加
+                confirm_msg = f"""
+                原任务: {task_name}
+                原时间: {original_start} - {original_end}
+                
+                是否重新添加为:
+                新时间: {new_start.split(" ")[1]} - {new_end.split(" ")[1]}
+                """
+                
+                if messagebox.askyesno("重新添加任务", confirm_msg):
+                    # 添加新任务
+                    success, msg, new_task_id = self.task_manager.add_task(
+                        task_name, new_start, new_end
+                    )
+                    if success:
+                        # 将原任务状态改为已拖延
+                        self.task_manager.update_task_status(task_id, 4)
+                        messagebox.showinfo("成功", "任务已重新添加")
+                        self.refresh_tasks()
+            else:
+                # 原有状态更改逻辑
+                status_map = {"未开始": 0, "进行中": 1, "已完成": 2, "已拖延": 4}
+                current_status = status_map[status_text]
+                
+                if current_status == 0:
+                    self.task_manager.update_task_status(task_id, 1)
+                elif current_status == 1:
+                    self.task_manager.update_task_status(task_id, 2)
+                elif current_status == 2:
+                    self.task_manager.update_task_status(task_id, 0)
+                elif current_status == 4:
+                    self.task_manager.update_task_status(task_id, 1)
+                    
+                self.refresh_tasks()
         elif column == 7:  # 删除列
-            task_id = self.task_tree.item(item, "values")[0]
             task_name = self.task_tree.item(item, "values")[1]
             self.confirm_delete(task_id, task_name, is_weekly=False)
     
@@ -1103,6 +1185,83 @@ class TimeManagementApp:
                     self.view_weekly_tasks()
             else:
                 messagebox.showerror("错误", msg)
+
+    def ai_add_task(self):
+        """AI智能添加任务（结合历史数据）"""
+        task_desc = simpledialog.askstring("AI添加任务", "请描述你的任务:")
+        if not task_desc:
+            return
+            
+        # 获取用户历史任务（最近10条）作为参考
+        historical_tasks = []
+        if not self.user_manager.current_user[2]:  # 非游客用户
+            # 从数据库获取历史任务
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT task_id, task_name, start_time, end_time, status 
+                FROM tasks 
+                WHERE user_id=? 
+                ORDER BY start_time DESC 
+                LIMIT 10
+            ''', (self.user_manager.current_user[0],))
+            historical_tasks = cursor.fetchall()
+            conn.close()
+        else:
+            # 游客用户从内存存储获取
+            historical_tasks = sorted(
+                self.task_manager.memory_storage.tasks,
+                key=lambda x: x[2],  # 按开始时间排序
+                reverse=True
+            )[:10]
+        
+        # 显示加载中
+        loading = tk.Toplevel(self.root)
+        loading.title("处理中")
+        loading.geometry("200x100")
+        loading.transient(self.root)
+        loading.grab_set()
+        
+        ttk.Label(loading, text="AI正在分析任务...").pack(expand=True)
+        self.root.update()
+        
+        # 传入历史任务解析新任务
+        task_info = self.ai_assistant.parse_task(task_desc, historical_tasks)
+        loading.destroy()
+        
+        if "error" in task_info:
+            messagebox.showerror("错误", task_info["error"])
+            return
+            
+        # 检查必要字段
+        required_fields = ["task_name", "start_time", "end_time"]
+        if not all(field in task_info for field in required_fields):
+            messagebox.showerror("错误", "AI 返回的任务信息不完整")
+            return
+            
+        # 确认任务信息
+        confirm_msg = f"""
+        任务名称: {task_info['task_name']}
+        开始时间: {task_info['start_time']}
+        结束时间: {task_info['end_time']}
+        
+        是否确认添加?
+        """
+        
+        if messagebox.askyesno("确认任务", confirm_msg):
+            # 检查时间冲突
+            if self.task_manager.check_conflict(task_info['start_time'], task_info['end_time']):
+                messagebox.showwarning("冲突", "任务时间与现有任务冲突")
+                return
+                
+            success, msg, _ = self.task_manager.add_task(
+                task_info['task_name'],
+                task_info['start_time'],
+                task_info['end_time']
+            )
+            messagebox.showinfo("结果", msg)
+            if success:
+                self.refresh_tasks()
     
     def undo_delete(self, event=None):
         """撤销删除操作 (Ctrl+Z)"""
@@ -1142,7 +1301,7 @@ class TimeManagementApp:
                     self.view_weekly_tasks()
             except Exception as e:
                 messagebox.showerror("错误", f"撤销失败: {str(e)}")
-            finally:
+            finally:    
                 conn.close()
 
 # ---------------------- 程序入口 ----------------------
