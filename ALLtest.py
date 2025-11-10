@@ -902,21 +902,54 @@ class TimeManagementApp:
                 original_start = self.task_tree.item(item, "values")[2]
                 original_end = self.task_tree.item(item, "values")[3]
                 
-                # 计算新时间（默认延后1小时）
+                # 创建时间选择对话框
+                dialog = tk.Toplevel(self.root)
+                dialog.title("选择新时间")
+                dialog.geometry("300x200")
+                dialog.transient(self.root)
+                dialog.grab_set()
+                
+                frame = ttk.Frame(dialog, padding="20")
+                frame.pack(expand=True, fill=tk.BOTH)
+                
+                # 新开始时间
+                ttk.Label(frame, text="新开始时间:").pack(anchor=tk.W, pady=5)
                 now = datetime.now(TIMEZONE)
-                new_start = datetime_to_str(now)
-                new_end = datetime_to_str(now + timedelta(hours=1))
+                default_start = datetime_to_str(now)
+                start_var = tk.StringVar(value=default_start)
+                ttk.Entry(frame, textvariable=start_var).pack(pady=5)
                 
-                # 确认重新添加
-                confirm_msg = f"""
-                原任务: {task_name}
-                原时间: {original_start} - {original_end}
+                # 新结束时间（默认延后1小时）
+                ttk.Label(frame, text="新结束时间:").pack(anchor=tk.W, pady=5)
+                default_end = datetime_to_str(now + timedelta(hours=1))
+                end_var = tk.StringVar(value=default_end)
+                ttk.Entry(frame, textvariable=end_var).pack(pady=5)
                 
-                是否重新添加为:
-                新时间: {new_start.split(" ")[1]} - {new_end.split(" ")[1]}
-                """
+                # 时间格式提示
+                ttk.Label(frame, text="时间格式: YYYY-MM-DD HH:MM:SS", font=("Arial", 8)).pack(pady=5)
                 
-                if messagebox.askyesno("重新添加任务", confirm_msg):
+                def confirm_new_time():
+                    new_start = start_var.get()
+                    new_end = end_var.get()
+                    
+                    # 验证时间格式
+                    try:
+                        str_to_datetime(new_start)
+                        str_to_datetime(new_end)
+                    except ValueError:
+                        messagebox.showwarning("警告", "时间格式不正确")
+                        return
+                        
+                    # 验证时间顺序
+                    if str_to_datetime(new_start) >= str_to_datetime(new_end):
+                        messagebox.showwarning("警告", "结束时间必须晚于开始时间")
+                        return
+                        
+                    # 验证时间是否在当前时间之后
+                    if str_to_datetime(new_start) < datetime.now(TIMEZONE):
+                        if not messagebox.askyesno("提示", "开始时间在当前时间之前，是否继续？"):
+                            return
+                    
                     # 添加新任务
                     success, msg, new_task_id = self.task_manager.add_task(
                         task_name, new_start, new_end
@@ -925,7 +958,13 @@ class TimeManagementApp:
                         # 将原任务状态改为已拖延
                         self.task_manager.update_task_status(task_id, 4)
                         messagebox.showinfo("成功", "任务已重新添加")
+                        dialog.destroy()
                         self.refresh_tasks()
+                    else:
+                        messagebox.showerror("失败", msg)
+                
+                ttk.Button(frame, text="确认", command=confirm_new_time).pack(pady=10)
+                
             else:
                 # 原有状态更改逻辑
                 status_map = {"未开始": 0, "进行中": 1, "已完成": 2, "已拖延": 4}
@@ -941,6 +980,7 @@ class TimeManagementApp:
                     self.task_manager.update_task_status(task_id, 1)
                     
                 self.refresh_tasks()
+                
         elif column == 7:  # 删除列
             task_name = self.task_tree.item(item, "values")[1]
             self.confirm_delete(task_id, task_name, is_weekly=False)
