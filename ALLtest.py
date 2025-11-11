@@ -1145,6 +1145,7 @@ class TimeManagementApp:
         mid_frame.pack(expand=True, fill=tk.BOTH)
         
         columns = ("id", "任务名称", "日期", "开始时间", "结束时间", "状态", "操作", "删除")
+        # 正确定义：类实例属性 self.weekly_tree
         self.weekly_tree = ttk.Treeview(mid_frame, columns=columns, show="headings")
         
         for col in columns:
@@ -1163,7 +1164,7 @@ class TimeManagementApp:
         
         self.weekly_tree.pack(expand=True, fill=tk.BOTH)
         
-        # 底部按钮
+        # 底部按钮（原代码中重复定义的 btn_frame 已合并，避免冗余）
         btn_frame = ttk.Frame(self.weekly_window, padding="10")
         btn_frame.pack(fill=tk.X)
         ttk.Button(btn_frame, text="关闭", command=self.weekly_window.destroy).pack(side=tk.RIGHT)
@@ -1171,9 +1172,6 @@ class TimeManagementApp:
         
         # 加载任务
         self.refresh_weekly_tasks()
-        
-        # 绑定事件
-        self.weekly_tree.bind("<ButtonRelease-1>", self.on_weekly_task_click)
         
         # 设置定时刷新（每30秒）
         def auto_refresh():
@@ -1183,18 +1181,20 @@ class TimeManagementApp:
         
         auto_refresh()
         
-        # 绑定操作事件
+        # 修正：嵌套函数中使用 self.weekly_tree 访问实例属性
         def on_weekly_task_click(event):
-            region = weekly_tree.identify_region(event.x, event.y)
-            item = weekly_tree.identify_row(event.y)
+            # 修正：使用 self.weekly_tree
+            region = self.weekly_tree.identify_region(event.x, event.y)
+            item = self.weekly_tree.identify_row(event.y)
             
             if not item or region != "cell":
                 return
                 
-            column = int(weekly_tree.identify_column(event.x).replace("#", ""))
+            column = int(self.weekly_tree.identify_column(event.x).replace("#", ""))
             if column == 6:  # 操作列
-                task_id = weekly_tree.item(item, "values")[0]
-                status = weekly_tree.item(item, "values")[4]
+                # 修正：从 self.weekly_tree 获取任务ID
+                task_id = self.weekly_tree.item(item, "values")[0]
+                status = self.weekly_tree.item(item, "values")[5]
                 
                 if status == "未开始":
                     self.task_manager.update_task_status(task_id, 1)
@@ -1208,16 +1208,13 @@ class TimeManagementApp:
                 self.view_weekly_tasks()
                 self.refresh_tasks()
             elif column == 7:  # 删除列
-                task_id = weekly_tree.item(item, "values")[0]
-                task_name = weekly_tree.item(item, "values")[1]
+                # 修正：从 self.weekly_tree 获取任务信息
+                task_id = self.weekly_tree.item(item, "values")[0]
+                task_name = self.weekly_tree.item(item, "values")[1]
                 self.confirm_delete(task_id, task_name, is_weekly=True)
         
-        weekly_tree.bind("<ButtonRelease-1>", on_weekly_task_click)
-        
-        # 底部按钮
-        btn_frame = ttk.Frame(self.weekly_window, padding="10")
-        btn_frame.pack(fill=tk.X)
-        ttk.Button(btn_frame, text="关闭", command=self.weekly_window.destroy).pack(side=tk.RIGHT)
+        # 修正：绑定事件到 self.weekly_tree
+        self.weekly_tree.bind("<ButtonRelease-1>", on_weekly_task_click)
     
     def refresh_weekly_tasks(self):
         """刷新每周任务列表"""
