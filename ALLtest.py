@@ -66,6 +66,18 @@ def get_weekday_name(weekday):
     weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     return weekdays[weekday]
 
+# 首先在工具函数部分添加一个计算屏幕右下角位置的函数
+def get_bottom_right_position(width, height):
+    """计算屏幕右下角的位置坐标"""
+    root = tk.Tk()
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    root.destroy()
+    # 右下角留出一点边距
+    x = screen_width - width - 20
+    y = screen_height - height - 80  # 考虑任务栏高度
+    return f"{width}x{height}+{x}+{y}"
+
 # ---------------------- 数据库初始化 ----------------------
 def init_database():
     """初始化数据库"""
@@ -649,6 +661,115 @@ class TimeManagementApp:
         
         # 绑定Ctrl+Z快捷键
         self.root.bind("<Control-z>", self.undo_delete)
+
+        # 添加任务提醒相关变量
+        self.reminder_checking = False
+        self.reminder_thread = None
+        
+        # 启动任务提醒检查
+        self.start_reminder_check()
+
+    def start_reminder_check(self):
+        """启动任务提醒检查线程"""
+        if not self.reminder_checking:
+            self.reminder_checking = True
+            self.reminder_thread = threading.Thread(target=self.check_reminders, daemon=True)
+            self.reminder_thread.start()
+    
+    def check_reminders(self):
+        """定时检查是否有即将开始的任务"""
+        while self.reminder_checking:
+            if self.task_manager:  # 确保任务管理器已初始化
+                # 获取今天所有未完成的任务
+                today_tasks = self.task_manager.get_today_tasks()
+                now = datetime.now(TIMEZONE)
+                
+                for task in today_tasks:
+                    task_id, task_name, start_time_str, end_time_str, status = task
+                    
+                    # 只处理未开始和进行中的任务
+                    if status in [0, 1]:
+                        try:
+                            start_time = str_to_datetime(start_time_str)
+                            # 计算时间差（秒）
+                            time_diff = (start_time - now).total_seconds()
+                            
+                            # 检查是否在提醒时间范围内（正负5秒，防止错过）
+                            if abs(time_diff) <= 5:
+                                # 在主线程中显示提醒窗口
+                                self.root.after(0, lambda t=task: self.show_task_reminder(t))
+                                # 避免重复提醒，暂时标记为已提醒（实际状态不变）
+                                time.sleep(10)  # 10秒内不再提醒同一个任务
+                        except Exception as e:
+                            print(f"检查任务提醒时出错: {e}")
+            
+            # 每3秒检查一次
+            time.sleep(3)
+    
+    def show_task_reminder(self, task):
+        """显示任务开始提醒弹窗（右下角）"""
+        task_id, task_name, start_time_str, end_time_str, status = task
+        
+        # 创建提醒窗口
+        reminder_window = tk.Toplevel(self.root)
+        reminder_window.title("任务提醒")
+        # 设置窗口大小和右下角位置
+        reminder_window.geometry(get_bottom_right_position(300, 150))
+        # 设置窗口置顶
+        reminder_window.attributes("-topmost", True)
+        # 去除窗口图标
+        reminder_window.iconbitmap(default="")
+        
+        frame = ttk.Frame(reminder_window, padding="20")
+        frame.pack(expand=True, fill=tk.BOTH)
+        
+        # 提醒信息
+        ttk.Label(
+            frame, 
+            text=f"任务 '{task_name}' 即将开始！", 
+            font=("Arial", 12)
+        ).pack(pady=10)
+        
+        ttk.Label(
+            frame, 
+            text=f"开始时间: {start_time_str.split(' ')[1]}", 
+            foreground="gray"
+        ).pack(pady=5)
+        
+        # 按钮框架
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=15)
+        
+        # 开始任务按钮
+        def start_task():
+            self.task_manager.update_task_status(task_id, 1)  # 标记为进行中
+            self.refresh_tasks()
+            reminder_window.destroy()
+        
+        # 稍后提醒按钮（10分钟后）
+        def remind_later():
+            reminder_window.destroy()
+            # 记录稍后提醒的任务，10分钟后再次检查
+            threading.Thread(
+                target=self.delayed_reminder, 
+                args=(task, 10*60),  # 10分钟
+                daemon=True
+            ).start()
+        
+        ttk.Button(btn_frame, text="开始任务", command=start_task).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="稍后提醒", command=remind_later).pack(side=tk.LEFT, padx=10)
+    
+    def delayed_reminder(self, task, delay_seconds):
+        """延迟提醒任务"""
+        time.sleep(delay_seconds)
+        # 再次检查任务状态，如果还是未开始则再次提醒
+        task_id = task[0]
+        # 重新获取任务最新状态
+        today_tasks = self.task_manager.get_today_tasks()
+        for t in today_tasks:
+            if t[0] == task_id and t[4] in [0, 1]:  # 仍未开始或进行中
+                self.root.after(0, lambda task=t: self.show_task_reminder(task))
+                break
     
     def create_login_ui(self):
         """创建登录界面"""
@@ -1111,6 +1232,11 @@ class TimeManagementApp:
         messagebox.showinfo("注册结果", msg)
     
     def logout(self):
+        """登出时停止提醒检查"""
+        self.reminder_checking = False
+        if self.reminder_thread:
+            self.reminder_thread.join(timeout=1)
+
         """登出处理"""
         success, msg = self.user_manager.logout()
         messagebox.showinfo("登出结果", msg)
