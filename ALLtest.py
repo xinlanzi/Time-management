@@ -1122,100 +1122,221 @@ class TimeManagementApp:
             widget.destroy()
 
     def view_weekly_tasks(self):
-        """查看每周任务"""
-        # 关闭已存在的每周任务窗口
+        """查看每周任务，合并相同日期和星期几的栏目"""
+        # 关闭已有的每周任务窗口
         if self.weekly_window and isinstance(self.weekly_window, tk.Toplevel) and self.weekly_window.winfo_exists():
             self.weekly_window.destroy()
         
         self.weekly_window = tk.Toplevel(self.root)
         self.weekly_window.title("每周任务")
-        self.weekly_window.geometry("900x600")
+        self.weekly_window.geometry("1000x600")
         self.weekly_window.transient(self.root)
-        
-        # 顶部框架
-        top_frame = ttk.Frame(self.weekly_window, padding="10")
-        top_frame.pack(fill=tk.X)
         
         # 获取本周任务
         tasks, start_date, end_date = self.task_manager.get_weekly_tasks()
-        ttk.Label(top_frame, text=f"本周任务 ({start_date} 至 {end_date})", font=("Arial", 16)).pack(anchor=tk.W)
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
         
-        # 任务列表
-        mid_frame = ttk.Frame(self.weekly_window, padding="10")
-        mid_frame.pack(expand=True, fill=tk.BOTH)
+        # 按日期分组任务
+        date_tasks = {}
+        for task in tasks:
+            task_id, name, start_time, end_time, status = task
+            task_date = start_time.split(" ")[0]  # 提取日期部分
+            if task_date not in date_tasks:
+                date_tasks[task_date] = []
+            date_tasks[task_date].append(task)
         
-        columns = ("id", "任务名称", "日期", "开始时间", "结束时间", "状态", "操作", "删除")
-        # 正确定义：类实例属性 self.weekly_tree
-        self.weekly_tree = ttk.Treeview(mid_frame, columns=columns, show="headings")
+        # 创建主框架
+        main_frame = ttk.Frame(self.weekly_window, padding="10")
+        main_frame.pack(expand=True, fill=tk.BOTH)
         
-        for col in columns:
-            self.weekly_tree.heading(col, text=col)
-            if col == "id":
-                width = 50
-            elif col in ["开始时间", "结束时间"]:
-                width = 100
-            elif col == "日期":
-                width = 100
-            elif col in ["操作", "删除"]:
-                width = 80
+        # 创建标题
+        title = f"{start_date} 至 {end_date} 任务安排"
+        ttk.Label(main_frame, text=title, font=("Arial", 16)).pack(anchor=tk.W, pady=10)
+        
+        # 创建滚动区域
+        canvas = tk.Canvas(main_frame)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # 状态映射
+        status_map = {0: "未开始", 1: "进行中", 2: "已完成", 3: "已超时", 4: "已拖延"}
+        
+        # 按日期顺序显示任务组
+        current_date = start_dt
+        while current_date <= end_dt:
+            date_str = current_date.strftime("%Y-%m-%d")
+            weekday = get_weekday_name(current_date.weekday())
+            
+            # 创建日期分组框架
+            date_frame = ttk.LabelFrame(
+                scrollable_frame, 
+                text=f"{date_str} {weekday}",
+                padding="10"
+            )
+            date_frame.pack(fill=tk.X, pady=5, padx=5)
+            
+            # 显示该日期的任务
+            if date_str in date_tasks and date_tasks[date_str]:
+                # 创建任务表格
+                columns = ("id", "任务名称", "开始时间", "结束时间", "状态", "操作")
+                tree = ttk.Treeview(date_frame, columns=columns, show="headings", height=min(5, len(date_tasks[date_str])))
+                
+                for col in columns:
+                    tree.heading(col, text=col)
+                    if col == "id":
+                        width = 50
+                    elif col in ["开始时间", "结束时间"]:
+                        width = 100
+                    elif col == "操作":
+                        width = 80
+                    else:
+                        width = 150
+                    tree.column(col, width=width, anchor=tk.CENTER)
+                
+                # 添加任务
+                for task in date_tasks[date_str]:
+                    task_id, name, start, end, status = task
+                    status_text = status_map.get(status, "未知")
+                    
+                    tag = "completed" if status == 2 else "in_progress" if status == 1 else \
+                          "expired" if status == 3 else "delayed" if status == 4 else ""
+                    tree.insert("", tk.END, values=(
+                        task_id, name, start.split(" ")[1], end.split(" ")[1], status_text, "更改"
+                    ), tags=(tag,))
+                
+                # 设置标签样式
+                tree.tag_configure("completed", foreground="gray")
+                tree.tag_configure("in_progress", foreground="blue")
+                tree.tag_configure("expired", foreground="red")
+                tree.tag_configure("delayed", foreground="orange")
+                
+                # 绑定点击事件
+                tree.bind("<ButtonRelease-1>", lambda e, t=tree: self.on_weekly_task_click(e, t))
+                tree.pack(fill=tk.X)
             else:
-                width = 150
-            self.weekly_tree.column(col, width=width, anchor=tk.CENTER)
+                # 无任务提示
+                ttk.Label(date_frame, text="当天没有任务", foreground="gray").pack(pady=5)
+            
+            current_date += timedelta(days=1)
         
-        self.weekly_tree.pack(expand=True, fill=tk.BOTH)
+        # 刷新按钮
+        ttk.Button(main_frame, text="刷新", command=self.view_weekly_tasks).pack(pady=10)
         
-        # 底部按钮（原代码中重复定义的 btn_frame 已合并，避免冗余）
-        btn_frame = ttk.Frame(self.weekly_window, padding="10")
-        btn_frame.pack(fill=tk.X)
-        ttk.Button(btn_frame, text="关闭", command=self.weekly_window.destroy).pack(side=tk.RIGHT)
-        ttk.Button(btn_frame, text="刷新", command=self.refresh_weekly_tasks).pack(side=tk.RIGHT, padx=10)
-        
-        # 加载任务
-        self.refresh_weekly_tasks()
-        
-        # 设置定时刷新（每30秒）
-        def auto_refresh():
-            if self.weekly_window and isinstance(self.weekly_window, tk.Toplevel) and self.weekly_window.winfo_exists():
-                self.refresh_weekly_tasks()
-                self.weekly_window.after(30000, auto_refresh)  # 30秒后再次刷新
-        
-        auto_refresh()
-        
-        # 修正：嵌套函数中使用 self.weekly_tree 访问实例属性
+        # 绑定点击事件
         def on_weekly_task_click(event):
-            # 修正：使用 self.weekly_tree
-            region = self.weekly_tree.identify_region(event.x, event.y)
-            item = self.weekly_tree.identify_row(event.y)
+            region = weekly_tree.identify_region(event.x, event.y)
+            item = weekly_tree.identify_row(event.y)
             
             if not item or region != "cell":
                 return
                 
-            column = int(self.weekly_tree.identify_column(event.x).replace("#", ""))
-            if column == 6:  # 操作列
-                # 修正：从 self.weekly_tree 获取任务ID
-                task_id = self.weekly_tree.item(item, "values")[0]
-                status = self.weekly_tree.item(item, "values")[5]
-                
-                if status == "未开始":
-                    self.task_manager.update_task_status(task_id, 1)
-                elif status == "进行中":
-                    self.task_manager.update_task_status(task_id, 2)
-                elif status == "已完成":
-                    self.task_manager.update_task_status(task_id, 0)
+            column = int(weekly_tree.identify_column(event.x).replace("#", ""))
+            task_id = int(weekly_tree.item(item, "values")[0])
+            status_text = weekly_tree.item(item, "values")[4]
+            
+            # 操作列 - 处理重新添加
+            if column == 6:
+                if status_text == "已超时":
+                    # 获取原任务信息
+                    task_name = weekly_tree.item(item, "values")[1]
+                    original_start = weekly_tree.item(item, "values")[2]
+                    original_end = weekly_tree.item(item, "values")[3]
                     
-                # 刷新当前窗口和主窗口的任务列表
-                self.weekly_window.destroy()
-                self.view_weekly_tasks()
-                self.refresh_tasks()
-            elif column == 7:  # 删除列
-                # 修正：从 self.weekly_tree 获取任务信息
-                task_id = self.weekly_tree.item(item, "values")[0]
-                task_name = self.weekly_tree.item(item, "values")[1]
-                self.confirm_delete(task_id, task_name, is_weekly=True)
+                    # 创建时间选择对话框
+                    dialog = tk.Toplevel(self.weekly_window)
+                    dialog.title("选择新时间")
+                    dialog.geometry("300x200")
+                    dialog.transient(self.weekly_window)
+                    dialog.grab_set()
+                    
+                    frame = ttk.Frame(dialog, padding="20")
+                    frame.pack(expand=True, fill=tk.BOTH)
+                    
+                    # 新开始时间
+                    ttk.Label(frame, text="新开始时间:").pack(anchor=tk.W, pady=5)
+                    now = datetime.now(TIMEZONE)
+                    default_start = datetime_to_str(now)
+                    start_var = tk.StringVar(value=default_start)
+                    ttk.Entry(frame, textvariable=start_var).pack(pady=5)
+                    
+                    # 新结束时间（默认延后1小时）
+                    ttk.Label(frame, text="新结束时间:").pack(anchor=tk.W, pady=5)
+                    default_end = datetime_to_str(now + timedelta(hours=1))
+                    end_var = tk.StringVar(value=default_end)
+                    ttk.Entry(frame, textvariable=end_var).pack(pady=5)
+                    
+                    # 时间格式提示
+                    ttk.Label(frame, text="时间格式: YYYY-MM-DD HH:MM:SS", font=("Arial", 8)).pack(pady=5)
+                    
+                    def confirm_new_time():
+                        new_start = start_var.get()
+                        new_end = end_var.get()
+                        
+                        # 验证时间格式
+                        try:
+                            str_to_datetime(new_start)
+                            str_to_datetime(new_end)
+                        except ValueError:
+                            messagebox.showwarning("警告", "时间格式不正确")
+                            return
+                            
+                        # 验证时间顺序
+                        if str_to_datetime(new_start) >= str_to_datetime(new_end):
+                            messagebox.showwarning("警告", "结束时间必须晚于开始时间")
+                            return
+                            
+                        # 检查时间冲突
+                        if self.task_manager.check_conflict(new_start, new_end):
+                            messagebox.showwarning("警告", "新时间与已有任务冲突")
+                            return
+                            
+                        # 添加新任务
+                        success, msg, new_task_id = self.task_manager.add_task(
+                            task_name, new_start, new_end
+                        )
+                        
+                        if success:
+                            # 将原任务状态改为已拖延
+                            self.task_manager.update_task_status(task_id, 4)
+                            messagebox.showinfo("成功", f"任务已重新添加，新任务ID: {new_task_id}")
+                            dialog.destroy()
+                            # 刷新两个界面的任务列表
+                            self.refresh_tasks()
+                            # 重新创建每周任务窗口以刷新数据
+                            self.view_weekly_tasks()
+                        else:
+                            messagebox.showerror("失败", msg)
+                    
+                    ttk.Button(frame, text="确认", command=confirm_new_time).pack(pady=10)
+                    ttk.Button(frame, text="取消", command=dialog.destroy).pack()
+            
+            # 删除列
+            elif column == 7:
+                if messagebox.askyesno("确认", "确定要删除此任务吗?"):
+                    success, msg, deleted_task = self.task_manager.delete_task(task_id)
+                    if success:
+                        self.undo_stack.append(deleted_task)
+                        messagebox.showinfo("提示", msg)
+                        # 刷新两个界面
+                        self.refresh_tasks()
+                        self.view_weekly_tasks()
+                    else:
+                        messagebox.showerror("错误", msg)
         
-        # 修正：绑定事件到 self.weekly_tree
-        self.weekly_tree.bind("<ButtonRelease-1>", on_weekly_task_click)
-    
+        weekly_tree.bind("<ButtonRelease-1>", on_weekly_task_click)
+
     def refresh_weekly_tasks(self):
         """刷新每周任务列表"""
         if not hasattr(self, 'weekly_tree'):
