@@ -676,8 +676,9 @@ class TimeManagementApp:
             self.reminder_thread = threading.Thread(target=self.check_reminders, daemon=True)
             self.reminder_thread.start()
     
+    # 在check_reminders方法中添加对结束时间的检查
     def check_reminders(self):
-        """定时检查是否有即将开始的任务"""
+        """定时检查是否有即将开始或结束的任务"""
         while self.reminder_checking:
             if self.task_manager:  # 确保任务管理器已初始化
                 # 获取今天所有未完成的任务
@@ -687,7 +688,7 @@ class TimeManagementApp:
                 for task in today_tasks:
                     task_id, task_name, start_time_str, end_time_str, status = task
                     
-                    # 只处理未开始和进行中的任务
+                    # 检查即将开始的任务
                     if status in [0, 1]:
                         try:
                             start_time = str_to_datetime(start_time_str)
@@ -701,7 +702,23 @@ class TimeManagementApp:
                                 # 避免重复提醒，暂时标记为已提醒（实际状态不变）
                                 time.sleep(10)  # 10秒内不再提醒同一个任务
                         except Exception as e:
-                            print(f"检查任务提醒时出错: {e}")
+                            print(f"检查任务开始提醒时出错: {e}")
+                    
+                    # 检查进行中任务是否到达结束时间
+                    if status == 1:  # 只处理进行中的任务
+                        try:
+                            end_time = str_to_datetime(end_time_str)
+                            # 计算时间差（秒）
+                            time_diff = (end_time - now).total_seconds()
+                            
+                            # 检查是否在结束时间前后5秒内
+                            if abs(time_diff) <= 5:
+                                # 在主线程中显示结束提醒窗口
+                                self.root.after(0, lambda t=task: self.show_task_end_reminder(t))
+                                # 避免重复提醒
+                                time.sleep(10)
+                        except Exception as e:
+                            print(f"检查任务结束提醒时出错: {e}")
             
             # 每3秒检查一次
             time.sleep(3)
@@ -798,6 +815,151 @@ class TimeManagementApp:
         ttk.Button(btn_frame, text="注册", command=self.register).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_frame, text="游客登录", command=self.enter_guest_mode).pack(side=tk.LEFT, padx=10)
     
+    # 添加任务结束提醒窗口
+    def show_task_end_reminder(self, task):
+        """显示任务结束提醒弹窗（右下角）"""
+        task_id, task_name, start_time_str, end_time_str, status = task
+        
+        # 创建提醒窗口
+        reminder_window = tk.Toplevel(self.root)
+        reminder_window.title("任务结束提醒")
+        # 设置窗口大小和右下角位置
+        reminder_window.geometry(get_bottom_right_position(350, 180))
+        # 设置窗口置顶
+        reminder_window.attributes("-topmost", True)
+        # 去除窗口图标
+        reminder_window.iconbitmap(default="")
+        
+        frame = ttk.Frame(reminder_window, padding="20")
+        frame.pack(expand=True, fill=tk.BOTH)
+        
+        # 提醒信息
+        ttk.Label(
+            frame, 
+            text=f"任务 '{task_name}' 已到结束时间！", 
+            font=("Arial", 12)
+        ).pack(pady=10)
+        
+        ttk.Label(
+            frame, 
+            text=f"原计划结束时间: {end_time_str.split(' ')[1]}", 
+            foreground="gray"
+        ).pack(pady=5)
+        
+        # 按钮框架
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=15)
+        
+        # 标记为已完成按钮
+        def mark_completed():
+            self.task_manager.update_task_status(task_id, 2)  # 标记为已完成
+            self.refresh_tasks()
+            reminder_window.destroy()
+        
+        # 继续任务按钮
+        def continue_task():
+            reminder_window.destroy()
+            # 10分钟后再次提醒
+            threading.Thread(
+                target=self.delayed_end_reminder, 
+                args=(task, 10*60),  # 10分钟
+                daemon=True
+            ).start()
+        
+        # 推迟任务按钮
+        def postpone_task():
+            # 获取当前时间
+            now = datetime.now(TIMEZONE)
+            # 默认推迟30分钟
+            default_end = now + timedelta(minutes=30)
+            
+            # 打开时间选择对话框
+            new_end_str = simpledialog.askstring(
+                "推迟任务", 
+                f"请输入新的结束时间\n格式: {default_end.strftime('%Y-%m-%d %H:%M:%S')}",
+                parent=reminder_window,
+                initialvalue=default_end.strftime("%Y-%m-%d %H:%M:%S")
+            )
+            
+            if new_end_str:
+                try:
+                    # 验证时间格式
+                    new_end = str_to_datetime(new_end_str)
+                    # 确保新时间在当前时间之后
+                    if new_end > now:
+                        # 更新任务结束时间（需要先修改TaskManager类，添加更新任务时间的方法）
+                        if self.update_task_end_time(task_id, new_end_str):
+                            messagebox.showinfo("成功", "任务已推迟")
+                            self.refresh_tasks()
+                            reminder_window.destroy()
+                        else:
+                            messagebox.showerror("错误", "无法更新任务时间")
+                    else:
+                        messagebox.showwarning("警告", "新时间必须晚于当前时间")
+                except ValueError:
+                    messagebox.showwarning("警告", "时间格式不正确")
+        
+        ttk.Button(btn_frame, text="已完成", command=mark_completed).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="继续完成", command=continue_task).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="推迟任务", command=postpone_task).pack(side=tk.LEFT, padx=5)
+
+    # 添加延迟结束提醒方法
+    def delayed_end_reminder(self, task, delay_seconds):
+        """延迟检查任务结束时间"""
+        time.sleep(delay_seconds)
+        # 重新获取任务最新状态
+        today_tasks = self.task_manager.get_today_tasks()
+        for t in today_tasks:
+            if t[0] == task[0] and t[4] == 1:  # 仍为进行中
+                self.root.after(0, lambda task=t: self.show_task_end_reminder(task))
+                break
+
+    # 添加更新任务结束时间的方法
+    def update_task_end_time(self, task_id, new_end_time):
+        """更新任务的结束时间"""
+        if self.task_manager.is_guest:
+            # 处理游客模式
+            for i, task in enumerate(self.task_manager.memory_storage.tasks):
+                if task[0] == task_id:
+                    # 检查新时间是否晚于开始时间
+                    if new_end_time > task[2]:  # task[2]是开始时间
+                        self.task_manager.memory_storage.tasks[i] = (
+                            task[0], task[1], task[2], new_end_time, task[4]
+                        )
+                        return True
+                    return False
+                    
+        # 处理登录用户模式
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        try:
+            # 先检查开始时间
+            cursor.execute(
+                "SELECT start_time FROM tasks WHERE task_id=? AND user_id=?",
+                (task_id, self.user_manager.current_user[0])
+            )
+            result = cursor.fetchone()
+            if not result:
+                return False
+                
+            start_time = result[0]
+            if new_end_time <= start_time:
+                return False
+                
+            # 更新结束时间
+            cursor.execute(
+                "UPDATE tasks SET end_time=? WHERE task_id=? AND user_id=?",
+                (new_end_time, task_id, self.user_manager.current_user[0])
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"更新任务结束时间出错: {e}")
+            return False
+        finally:
+            conn.close()
+
     def enter_guest_mode(self):
         """进入游客模式"""
         success, msg = self.user_manager.enter_guest_mode()
