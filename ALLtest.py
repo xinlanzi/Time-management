@@ -1044,7 +1044,7 @@ class TimeManagementApp:
             self.create_main_ui()
     
     def create_main_ui(self):
-        """创建主界面"""
+        """创建主界面（添加智能排序按钮）"""
         self.clear_window()
         
         # 顶部框架 - 显示时间和用户信息
@@ -1091,9 +1091,11 @@ class TimeManagementApp:
         
         ttk.Button(btn_frame, text="添加任务", command=self.add_task_dialog).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_frame, text="AI智能添加", command=self.ai_add_task).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="刷新任务", command=self.refresh_tasks).pack(side=tk.RIGHT, padx=10)
         ttk.Button(btn_frame, text="查看每周任务", command=self.view_weekly_tasks).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_frame, text="添加固定任务", command=self.add_recurring_task_dialog).pack(side=tk.LEFT, padx=10)
+        # 新增智能排序按钮
+        ttk.Button(btn_frame, text="智能排序", command=self.open_smart_sorting_window).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="刷新任务", command=self.refresh_tasks).pack(side=tk.RIGHT, padx=10)
         
         # 加载任务
         self.refresh_tasks()
@@ -1963,6 +1965,172 @@ class TimeManagementApp:
             if success:
                 self.refresh_tasks()
     
+    def open_smart_sorting_window(self):
+        """打开智能排序窗口"""
+        # 创建新窗口
+        smart_window = tk.Toplevel(self.root)
+        smart_window.title("智能排序")
+        smart_window.geometry("500x400")
+        smart_window.resizable(False, False)
+        smart_window.transient(self.root)
+        smart_window.grab_set()
+        
+        # 窗口框架
+        frame = ttk.Frame(smart_window, padding="20")
+        frame.pack(expand=True, fill=tk.BOTH)
+        
+        # 标题
+        ttk.Label(frame, text="任务智能排序", font=("Arial", 16)).pack(pady=10)
+        ttk.Label(frame, text="设置任务的截止时间和预期耗时，系统将自动调整日程", foreground="gray").pack(pady=5)
+        
+        # 创建任务列表
+        columns = ("任务名称", "截止时间", "预期耗时(小时)")
+        self.sort_tree = ttk.Treeview(frame, columns=columns, show="headings", height=8)
+        
+        # 设置列宽和标题
+        self.sort_tree.column("任务名称", width=180, anchor=tk.W)
+        self.sort_tree.column("截止时间", width=150, anchor=tk.CENTER)
+        self.sort_tree.column("预期耗时(小时)", width=100, anchor=tk.CENTER)
+        
+        for col in columns:
+            self.sort_tree.heading(col, text=col)
+        
+        self.sort_tree.pack(pady=10, fill=tk.X)
+        
+        # 加载当前任务到列表
+        self.load_tasks_for_sorting()
+        
+        # 按钮框架
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=20, fill=tk.X)
+        
+        # 添加任务按钮
+        ttk.Button(btn_frame, text="添加任务到排序", command=self.add_task_to_sorting).pack(side=tk.LEFT, padx=10)
+        
+        # 清空按钮
+        ttk.Button(btn_frame, text="清空列表", command=lambda: self.sort_tree.delete(*self.sort_tree.get_children())).pack(side=tk.LEFT, padx=10)
+        
+        # 右侧按钮
+        right_btn_frame = ttk.Frame(btn_frame)
+        right_btn_frame.pack(side=tk.RIGHT)
+        
+        # 取消按钮
+        ttk.Button(right_btn_frame, text="取消", command=smart_window.destroy).pack(side=tk.RIGHT, padx=10)
+        
+        # 应用排序按钮
+        ttk.Button(right_btn_frame, text="应用智能排序", command=lambda: self.apply_smart_sorting(smart_window)).pack(side=tk.RIGHT, padx=10)
+
+    def load_tasks_for_sorting(self):
+        """加载当前任务到智能排序窗口"""
+        # 先清空现有项
+        for item in self.sort_tree.get_children():
+            self.sort_tree.delete(item)
+        
+        # 获取今日任务
+        today_tasks = self.task_manager.get_today_tasks()
+        
+        # 添加到排序列表
+        for task in today_tasks:
+            task_id, task_name, start_time_str, end_time_str, status = task
+            # 默认截止时间设为原结束时间，耗时设为1小时
+            self.sort_tree.insert("", tk.END, values=(task_name, end_time_str, "1"))
+
+    def add_task_to_sorting(self):
+        """添加新任务到智能排序列表"""
+        # 创建对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("添加任务")
+        dialog.geometry("300x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(expand=True, fill=tk.BOTH)
+        
+        # 任务名称
+        ttk.Label(frame, text="任务名称:").pack(anchor=tk.W, pady=5)
+        name_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=name_var).pack(fill=tk.X, pady=5)
+        
+        # 截止时间
+        ttk.Label(frame, text="截止时间:").pack(anchor=tk.W, pady=5)
+        default_deadline = (datetime.now(TIMEZONE) + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        deadline_var = tk.StringVar(value=default_deadline)
+        ttk.Entry(frame, textvariable=deadline_var).pack(fill=tk.X, pady=5)
+        
+        # 预期耗时
+        ttk.Label(frame, text="预期耗时(小时):").pack(anchor=tk.W, pady=5)
+        duration_var = tk.StringVar(value="1")
+        ttk.Entry(frame, textvariable=duration_var).pack(fill=tk.X, pady=5)
+        
+        # 按钮
+        def add():
+            name = name_var.get().strip()
+            deadline = deadline_var.get().strip()
+            duration = duration_var.get().strip()
+            
+            if not name or not deadline or not duration:
+                messagebox.showerror("错误", "请填写所有字段")
+                return
+                
+            try:
+                # 验证时间格式
+                str_to_datetime(deadline)
+                # 验证耗时为数字
+                float(duration)
+                # 添加到排序列表
+                self.sort_tree.insert("", tk.END, values=(name, deadline, duration))
+                dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("错误", f"输入格式错误: {str(e)}")
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=10, fill=tk.X)
+        
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=10)
+        ttk.Button(btn_frame, text="添加", command=add).pack(side=tk.RIGHT, padx=10)
+
+    def apply_smart_sorting(self, window):
+        """应用智能排序（暂不实现具体算法，仅做演示）"""
+        # 获取所有任务信息
+        tasks = []
+        for item in self.sort_tree.get_children():
+            values = self.sort_tree.item(item, "values")
+            if len(values) == 3:
+                task_name, deadline_str, duration_str = values
+                try:
+                    deadline = str_to_datetime(deadline_str)
+                    duration = float(duration_str)
+                    # 计算开始时间（截止时间前duration小时）
+                    start_time = deadline - timedelta(hours=duration)
+                    tasks.append({
+                        "name": task_name,
+                        "deadline": deadline,
+                        "duration": duration,
+                        "start_time": start_time
+                    })
+                except Exception as e:
+                    messagebox.showerror("错误", f"任务 '{task_name}' 信息格式错误: {str(e)}")
+                    return
+        
+        if not tasks:
+            messagebox.showinfo("提示", "没有任务需要排序")
+            return
+        
+        # 这里仅做演示，实际算法需要在这里实现
+        # 简单按截止时间排序
+        sorted_tasks = sorted(tasks, key=lambda x: x["deadline"])
+        
+        # 显示排序结果
+        result_str = "智能排序结果:\n\n"
+        for i, task in enumerate(sorted_tasks, 1):
+            result_str += f"{i}. {task['name']}\n"
+            result_str += f"   开始时间: {datetime_to_str(task['start_time'])}\n"
+            result_str += f"   截止时间: {datetime_to_str(task['deadline'])}\n\n"
+        
+        messagebox.showinfo("排序完成", result_str)
+        window.destroy()
+
     def undo_delete(self, event=None):
         """撤销删除操作 (Ctrl+Z)"""
         if not self.undo_stack:
