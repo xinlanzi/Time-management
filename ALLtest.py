@@ -243,6 +243,29 @@ class InMemoryStorage:
         except Exception as e:
             return False, f"添加失败: {str(e)}", None
 
+    # 更新任务的方法
+    def update_task(self, task_id, new_name=None, new_start=None, new_end=None):
+        """更新任务信息"""
+        for i, task in enumerate(self.tasks):
+            if task[0] == task_id:
+                # 保留原信息，只更新提供的新值
+                name = new_name if new_name else task[1]
+                start = new_start if new_start else task[2]
+                end = new_end if new_end else task[3]
+                
+                # 检查时间冲突（如果时间有变更）
+                if new_start or new_end:
+                    for t in self.tasks:
+                        if t[0] != task_id and t[4] != 2 and (
+                            (t[2] < end and t[3] > start) or
+                            (start < t[3] and end > t[2])
+                        ):
+                            return False, "任务时间冲突"
+                
+                self.tasks[i] = (task[0], name, start, end, task[4])
+                return True, "任务更新成功"
+        return False, "任务不存在"
+
 # ---------------------- AI助手类 ----------------------
 class AIAssistant:
     """AI助手类"""
@@ -346,14 +369,13 @@ class TaskManager:
         finally:
             conn.close()
     
-    def check_conflict(self, start_time, end_time):
-        """检查时间冲突"""
+    def check_conflict(self, start_time, end_time, exclude_task_id=None):
+        """检查时间冲突，可排除指定任务ID"""
         if self.is_guest:
             for task in self.memory_storage.tasks:
-                _, _, s, e, status = task
-                if status != 2 and (
-                    (s < end_time and e > start_time) or
-                    (s < end_time and e > start_time)
+                if (exclude_task_id is None or task[0] != exclude_task_id) and task[4] != 2 and (
+                    (task[2] < end_time and task[3] > start_time) or
+                    (start_time < task[3] and end_time > task[2])
                 ):
                     return True
             return False
@@ -361,15 +383,22 @@ class TaskManager:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        cursor.execute('''
+        query = '''
             SELECT * FROM tasks 
             WHERE user_id=? AND status != 2 
             AND (
                 (start_time < ? AND end_time > ?) OR
                 (start_time < ? AND end_time > ?)
             )
-        ''', (self.user_id, end_time, start_time, end_time, start_time))
+        '''
+        params = [self.user_id, end_time, start_time, end_time, start_time]
         
+        # 如果有排除的任务ID，添加条件
+        if exclude_task_id is not None:
+            query += " AND task_id != ?"
+            params.append(exclude_task_id)
+        
+        cursor.execute(query, params)
         conflict = cursor.fetchone() is not None
         conn.close()
         return conflict
@@ -416,6 +445,46 @@ class TaskManager:
         
         return updated_tasks
     
+    def update_task(self, task_id, new_name=None, new_start=None, new_end=None):
+        """更新任务信息"""
+        if self.is_guest:
+            return self.memory_storage.update_task(task_id, new_name, new_start, new_end)
+            
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        try:
+            # 获取当前任务信息
+            cursor.execute(
+                "SELECT task_name, start_time, end_time FROM tasks WHERE task_id=? AND user_id=?",
+                (task_id, self.user_id)
+            )
+            task = cursor.fetchone()
+            if not task:
+                return False, "任务不存在"
+                
+            # 保留原信息，只更新提供的新值
+            name = new_name if new_name else task[0]
+            start = new_start if new_start else task[1]
+            end = new_end if new_end else task[2]
+            
+            # 检查时间冲突（如果时间有变更）
+            if new_start or new_end:
+                if self.check_conflict(start, end, exclude_task_id=task_id):
+                    return False, "任务时间冲突"
+            
+            # 更新任务
+            cursor.execute('''
+                UPDATE tasks SET task_name=?, start_time=?, end_time=? 
+                WHERE task_id=? AND user_id=?
+            ''', (name, start, end, task_id, self.user_id))
+            conn.commit()
+            return True, "任务更新成功"
+        except Exception as e:
+            return False, f"更新失败: {str(e)}"
+        finally:
+            conn.close()
+
     def update_task_status(self, task_id, status):
         """更新任务状态"""
         if self.is_guest:
@@ -1000,6 +1069,7 @@ class TimeManagementApp:
         # 任务列表
         columns = ("id", "任务名称", "开始时间", "结束时间", "状态", "操作", "删除")
         self.task_tree = ttk.Treeview(mid_frame, columns=columns, show="headings")
+        self.task_tree.bind("<Double-1>", self.on_task_double_click)
         
         for col in columns:
             self.task_tree.heading(col, text=col)
@@ -1031,6 +1101,15 @@ class TimeManagementApp:
         # 绑定任务列表事件
         self.task_tree.bind("<ButtonRelease-1>", self.on_task_click)
     
+    def on_task_double_click(self, event):
+        """处理任务项双击事件"""
+        # 获取双击的项目
+        item = self.task_tree.selection()
+        if item:
+            # 获取任务ID（假设任务ID存储在第一列）
+            task_id = int(self.task_tree.item(item, "values")[0])
+            self.edit_task(task_id)
+
     def add_recurring_task_dialog(self):
         """添加固定任务对话框"""
         dialog = tk.Toplevel(self.root)
@@ -1409,7 +1488,89 @@ class TimeManagementApp:
         for widget in self.root.winfo_children():
             widget.destroy()
 
+    def edit_task(self, task_id):
+        """编辑任务对话框"""
+        # 获取任务当前信息
+        today_tasks = self.task_manager.get_today_tasks()
+        task = next((t for t in today_tasks if t[0] == task_id), None)
+        
+        if not task:
+            messagebox.showerror("错误", "任务不存在")
+            return
+            
+        task_id, task_name, start_time_str, end_time_str, status = task
+        
+        # 创建编辑窗口
+        edit_window = tk.Toplevel(self.root)
+        edit_window.title("编辑任务")
+        edit_window.geometry("400x300")
+        edit_window.resizable(False, False)
+        edit_window.transient(self.root)  # 设置为主窗口的子窗口
+        edit_window.grab_set()  # 模态窗口
+        
+        frame = ttk.Frame(edit_window, padding="20")
+        frame.pack(expand=True, fill=tk.BOTH)
+        
+        # 任务名称
+        ttk.Label(frame, text="任务名称:").pack(anchor=tk.W, pady=5)
+        name_var = tk.StringVar(value=task_name)
+        ttk.Entry(frame, textvariable=name_var, width=40).pack(pady=5)
+        
+        # 开始时间
+        ttk.Label(frame, text="开始时间:").pack(anchor=tk.W, pady=5)
+        start_var = tk.StringVar(value=start_time_str)
+        ttk.Entry(frame, textvariable=start_var, width=40).pack(pady=5)
+        ttk.Label(frame, text="格式: YYYY-MM-DD HH:MM:SS", foreground="gray").pack(anchor=tk.W)
+        
+        # 结束时间
+        ttk.Label(frame, text="结束时间:").pack(anchor=tk.W, pady=5)
+        end_var = tk.StringVar(value=end_time_str)
+        ttk.Entry(frame, textvariable=end_var, width=40).pack(pady=5)
+        ttk.Label(frame, text="格式: YYYY-MM-DD HH:MM:SS", foreground="gray").pack(anchor=tk.W)
+        
+        # 按钮
+        def save_changes():
+            new_name = name_var.get().strip()
+            new_start = start_var.get().strip()
+            new_end = end_var.get().strip()
+            
+            if not new_name:
+                messagebox.showwarning("警告", "任务名称不能为空")
+                return
+                
+            # 验证时间格式
+            try:
+                str_to_datetime(new_start)
+                str_to_datetime(new_end)
+            except ValueError:
+                messagebox.showwarning("警告", "时间格式不正确")
+                return
+                
+            # 验证时间顺序
+            if new_start >= new_end:
+                messagebox.showwarning("警告", "结束时间必须晚于开始时间")
+                return
+                
+            # 更新任务
+            success, msg = self.task_manager.update_task(
+                task_id, new_name, new_start, new_end
+            )
+            
+            if success:
+                messagebox.showinfo("成功", msg)
+                self.refresh_tasks()
+                edit_window.destroy()
+            else:
+                messagebox.showerror("错误", msg)
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=20)
+        
+        ttk.Button(btn_frame, text="保存", command=save_changes).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="取消", command=edit_window.destroy).pack(side=tk.LEFT, padx=10)
+
     def view_weekly_tasks(self):
+    
         """查看每周任务，合并相同日期和星期几的栏目"""
         # 关闭已有的每周任务窗口
         if self.weekly_window and isinstance(self.weekly_window, tk.Toplevel) and self.weekly_window.winfo_exists():
@@ -1522,107 +1683,107 @@ class TimeManagementApp:
         # 刷新按钮
         ttk.Button(main_frame, text="刷新", command=self.view_weekly_tasks).pack(pady=10)
         
-        # 绑定点击事件
-        def on_weekly_task_click(event):
-            region = weekly_tree.identify_region(event.x, event.y)
-            item = weekly_tree.identify_row(event.y)
+    # 绑定点击事件
+    def on_weekly_task_click(event):
+        region = weekly_tree.identify_region(event.x, event.y)
+        item = weekly_tree.identify_row(event.y)
+        
+        if not item or region != "cell":
+            return
             
-            if not item or region != "cell":
-                return
+        column = int(weekly_tree.identify_column(event.x).replace("#", ""))
+        task_id = int(weekly_tree.item(item, "values")[0])
+        status_text = weekly_tree.item(item, "values")[4]
+        
+        # 操作列 - 处理重新添加
+        if column == 6:
+            if status_text == "已超时":
+                # 获取原任务信息
+                task_name = weekly_tree.item(item, "values")[1]
+                original_start = weekly_tree.item(item, "values")[2]
+                original_end = weekly_tree.item(item, "values")[3]
                 
-            column = int(weekly_tree.identify_column(event.x).replace("#", ""))
-            task_id = int(weekly_tree.item(item, "values")[0])
-            status_text = weekly_tree.item(item, "values")[4]
-            
-            # 操作列 - 处理重新添加
-            if column == 6:
-                if status_text == "已超时":
-                    # 获取原任务信息
-                    task_name = weekly_tree.item(item, "values")[1]
-                    original_start = weekly_tree.item(item, "values")[2]
-                    original_end = weekly_tree.item(item, "values")[3]
+                # 创建时间选择对话框
+                dialog = tk.Toplevel(self.weekly_window)
+                dialog.title("选择新时间")
+                dialog.geometry("300x200")
+                dialog.transient(self.weekly_window)
+                dialog.grab_set()
+                
+                frame = ttk.Frame(dialog, padding="20")
+                frame.pack(expand=True, fill=tk.BOTH)
+                
+                # 新开始时间
+                ttk.Label(frame, text="新开始时间:").pack(anchor=tk.W, pady=5)
+                now = datetime.now(TIMEZONE)
+                default_start = datetime_to_str(now)
+                start_var = tk.StringVar(value=default_start)
+                ttk.Entry(frame, textvariable=start_var).pack(pady=5)
+                
+                # 新结束时间（默认延后1小时）
+                ttk.Label(frame, text="新结束时间:").pack(anchor=tk.W, pady=5)
+                default_end = datetime_to_str(now + timedelta(hours=1))
+                end_var = tk.StringVar(value=default_end)
+                ttk.Entry(frame, textvariable=end_var).pack(pady=5)
+                
+                # 时间格式提示
+                ttk.Label(frame, text="时间格式: YYYY-MM-DD HH:MM:SS", font=("Arial", 8)).pack(pady=5)
+                
+                def confirm_new_time():
+                    new_start = start_var.get()
+                    new_end = end_var.get()
                     
-                    # 创建时间选择对话框
-                    dialog = tk.Toplevel(self.weekly_window)
-                    dialog.title("选择新时间")
-                    dialog.geometry("300x200")
-                    dialog.transient(self.weekly_window)
-                    dialog.grab_set()
-                    
-                    frame = ttk.Frame(dialog, padding="20")
-                    frame.pack(expand=True, fill=tk.BOTH)
-                    
-                    # 新开始时间
-                    ttk.Label(frame, text="新开始时间:").pack(anchor=tk.W, pady=5)
-                    now = datetime.now(TIMEZONE)
-                    default_start = datetime_to_str(now)
-                    start_var = tk.StringVar(value=default_start)
-                    ttk.Entry(frame, textvariable=start_var).pack(pady=5)
-                    
-                    # 新结束时间（默认延后1小时）
-                    ttk.Label(frame, text="新结束时间:").pack(anchor=tk.W, pady=5)
-                    default_end = datetime_to_str(now + timedelta(hours=1))
-                    end_var = tk.StringVar(value=default_end)
-                    ttk.Entry(frame, textvariable=end_var).pack(pady=5)
-                    
-                    # 时间格式提示
-                    ttk.Label(frame, text="时间格式: YYYY-MM-DD HH:MM:SS", font=("Arial", 8)).pack(pady=5)
-                    
-                    def confirm_new_time():
-                        new_start = start_var.get()
-                        new_end = end_var.get()
+                    # 验证时间格式
+                    try:
+                        str_to_datetime(new_start)
+                        str_to_datetime(new_end)
+                    except ValueError:
+                        messagebox.showwarning("警告", "时间格式不正确")
+                        return
                         
-                        # 验证时间格式
-                        try:
-                            str_to_datetime(new_start)
-                            str_to_datetime(new_end)
-                        except ValueError:
-                            messagebox.showwarning("警告", "时间格式不正确")
-                            return
-                            
-                        # 验证时间顺序
-                        if str_to_datetime(new_start) >= str_to_datetime(new_end):
-                            messagebox.showwarning("警告", "结束时间必须晚于开始时间")
-                            return
-                            
-                        # 检查时间冲突
-                        if self.task_manager.check_conflict(new_start, new_end):
-                            messagebox.showwarning("警告", "新时间与已有任务冲突")
-                            return
-                            
-                        # 添加新任务
-                        success, msg, new_task_id = self.task_manager.add_task(
-                            task_name, new_start, new_end
-                        )
+                    # 验证时间顺序
+                    if str_to_datetime(new_start) >= str_to_datetime(new_end):
+                        messagebox.showwarning("警告", "结束时间必须晚于开始时间")
+                        return
                         
-                        if success:
-                            # 将原任务状态改为已拖延
-                            self.task_manager.update_task_status(task_id, 4)
-                            messagebox.showinfo("成功", f"任务已重新添加，新任务ID: {new_task_id}")
-                            dialog.destroy()
-                            # 刷新两个界面的任务列表
-                            self.refresh_tasks()
-                            # 重新创建每周任务窗口以刷新数据
-                            self.view_weekly_tasks()
-                        else:
-                            messagebox.showerror("失败", msg)
+                    # 检查时间冲突
+                    if self.task_manager.check_conflict(new_start, new_end):
+                        messagebox.showwarning("警告", "新时间与已有任务冲突")
+                        return
+                        
+                    # 添加新任务
+                    success, msg, new_task_id = self.task_manager.add_task(
+                        task_name, new_start, new_end
+                    )
                     
-                    ttk.Button(frame, text="确认", command=confirm_new_time).pack(pady=10)
-                    ttk.Button(frame, text="取消", command=dialog.destroy).pack()
-            
-            # 删除列
-            elif column == 7:
-                if messagebox.askyesno("确认", "确定要删除此任务吗?"):
-                    success, msg, deleted_task = self.task_manager.delete_task(task_id)
                     if success:
-                        self.undo_stack.append(deleted_task)
-                        messagebox.showinfo("提示", msg)
-                        # 刷新两个界面
+                        # 将原任务状态改为已拖延
+                        self.task_manager.update_task_status(task_id, 4)
+                        messagebox.showinfo("成功", f"任务已重新添加，新任务ID: {new_task_id}")
+                        dialog.destroy()
+                        # 刷新两个界面的任务列表
                         self.refresh_tasks()
+                        # 重新创建每周任务窗口以刷新数据
                         self.view_weekly_tasks()
                     else:
-                        messagebox.showerror("错误", msg)
+                        messagebox.showerror("失败", msg)
+                
+                ttk.Button(frame, text="确认", command=confirm_new_time).pack(pady=10)
+                ttk.Button(frame, text="取消", command=dialog.destroy).pack()
         
+        # 删除列
+        elif column == 7:
+            if messagebox.askyesno("确认", "确定要删除此任务吗?"):
+                success, msg, deleted_task = self.task_manager.delete_task(task_id)
+                if success:
+                    self.undo_stack.append(deleted_task)
+                    messagebox.showinfo("提示", msg)
+                    # 刷新两个界面
+                    self.refresh_tasks()
+                    self.view_weekly_tasks()
+                else:
+                    messagebox.showerror("错误", msg)
+    
         weekly_tree.bind("<ButtonRelease-1>", on_weekly_task_click)
 
     def refresh_weekly_tasks(self):
